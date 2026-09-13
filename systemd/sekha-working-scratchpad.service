@@ -1,0 +1,31 @@
+[Unit]
+Description=Sekha Working Memory Deliberation Scratchpad Daemon
+Documentation=https://github.com/Duara-Cortex/sekha-working-scratchpad
+After=network.target sekha-working-inference.service
+Wants=sekha-working-inference.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/sekha
+ExecStart=/usr/local/bin/sekha-working-scratchpad -port 8083 -llama-url http://127.0.0.1:8082 -context-limit 2048 -output-reserve 256
+Restart=always
+RestartSec=3
+
+# Resource & File Descriptor Limits
+LimitNOFILE=65535
+
+# Sandboxing & Security Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+# Standard Logging to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sekha-scratchpad
+
+[Install]
+WantedBy=multi-user.target
