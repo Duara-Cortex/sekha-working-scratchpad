@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,9 +12,18 @@ import (
 	"time"
 )
 
+// Request defines the input parameters for a model inference call.
+type Request struct {
+	Model        string
+	SystemPrompt string
+	UserPrompt   string
+	MaxTokens    int
+	Temperature  float64
+}
+
 // Engine defines the interface for language model inference.
 type Engine interface {
-	Infer(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (*DeliberationOutput, error)
+	Infer(ctx context.Context, req Request) (*DeliberationOutput, error)
 	Health(ctx context.Context) error
 }
 
@@ -30,34 +40,75 @@ type DeliberationOutput struct {
 	PredictedTPS     float64
 }
 
-// LlamaClient connects to local llama-server running on Node 2 (port 8082).
-type LlamaClient struct {
+// Config defines the explicit settings required to connect to an OpenAI-compatible inference server.
+type Config struct {
+	BaseURL    string
+	Model      string
+	Timeout    time.Duration
+	HTTPClient *http.Client
+}
+
+// Client connects to any OpenAI-compatible inference server (llama-server, vLLM, Ollama, etc.).
+type Client struct {
 	baseURL    string
+	modelName  string
 	httpClient *http.Client
 }
 
-// NewClient initializes a client pointing to llama-server.
-func NewClient(baseURL string, timeout time.Duration) *LlamaClient {
-	if baseURL == "" {
-		baseURL = "http://127.0.0.1:8082"
+// LlamaClient provides a backwards-compatible type alias for Client.
+type LlamaClient = Client
+
+// NewClient initializes a client with explicit base URL, model name, and timeout.
+func NewClient(baseURL, modelName string, timeout time.Duration) (*Client, error) {
+	return NewClientWithConfig(Config{
+		BaseURL: baseURL,
+		Model:   modelName,
+		Timeout: timeout,
+	})
+}
+
+// NewClientWithConfig initializes a client using a Config struct. Returns an error if required settings are missing.
+func NewClientWithConfig(cfg Config) (*Client, error) {
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		return nil, errors.New("inference BaseURL is required and cannot be empty")
 	}
-	if timeout <= 0 {
-		timeout = 60 * time.Second
+	if strings.TrimSpace(cfg.Model) == "" {
+		return nil, errors.New("inference Model is required and cannot be empty")
 	}
-	return &LlamaClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+	if cfg.Timeout <= 0 {
+		return nil, errors.New("inference Timeout must be greater than zero")
 	}
+
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: cfg.Timeout,
+		}
+	}
+
+	return &Client{
+		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
+		modelName:  strings.TrimSpace(cfg.Model),
+		httpClient: httpClient,
+	}, nil
+}
+
+// Model returns the configured default model name for the client.
+func (c *Client) Model() string {
+	return c.modelName
+}
+
+// BaseURL returns the configured base URL for the client.
+func (c *Client) BaseURL() string {
+	return c.baseURL
 }
 
 type openAIChatRequest struct {
-	Model       string               `json:"model,omitempty"`
-	Messages    []openAIChatMessage  `json:"messages"`
-	Temperature float64              `json:"temperature"`
-	MaxTokens   int                  `json:"max_tokens"`
-	Stream      bool                 `json:"stream"`
+	Model       string              `json:"model"`
+	Messages    []openAIChatMessage `json:"messages"`
+	Temperature float64             `json:"temperature"`
+	MaxTokens   int                 `json:"max_tokens"`
+	Stream      bool                `json:"stream"`
 }
 
 type openAIChatMessage struct {
@@ -84,47 +135,56 @@ type openAIChatResponse struct {
 	} `json:"timings"`
 }
 
-// Infer sends the prompt payload to llama-server and extracts deliberation fields.
-func (c *LlamaClient) Infer(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (*DeliberationOutput, error) {
+// Infer sends the prompt payload to the inference engine and extracts deliberation fields.
+func (c *Client) Infer(ctx context.Context, req Request) (*DeliberationOutput, error) {
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		modelName = c.modelName
+	}
+	if modelName == "" {
+		return nil, errors.New("model name is required for inference")
+	}
+
+	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 256
 	}
-	if temperature <= 0 {
-		temperature = 0.2
-	}
 
 	reqBody := openAIChatRequest{
-		Model: "qwen2.5-1.5b-instruct",
+		Model: modelName,
 		Messages: []openAIChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
+			{Role: "system", Content: req.SystemPrompt},
+			{Role: "user", Content: req.UserPrompt},
 		},
-		Temperature: temperature,
+		Temperature: req.Temperature,
 		MaxTokens:   maxTokens,
 		Stream:      false,
 	}
 
 	data, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal inference request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	endpointURL := fmt.Sprintf("%s/v1/chat/completions", c.baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create inference HTTP request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("inference call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("inference endpoint returned %d: %s", resp.StatusCode, string(bodyBytes))
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("inference endpoint returned %d (failed to read response: %w)", resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("inference endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
 	var chatResp openAIChatResponse
@@ -152,26 +212,27 @@ func (c *LlamaClient) Infer(ctx context.Context, systemPrompt, userPrompt string
 	}, nil
 }
 
-// Health checks reachability of the llama-server endpoint.
-func (c *LlamaClient) Health(ctx context.Context) error {
-	url := fmt.Sprintf("%s/health", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// Health checks reachability of the inference engine endpoint.
+func (c *Client) Health(ctx context.Context) error {
+	endpointURL := fmt.Sprintf("%s/health", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create health check request: %w", err)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("health check request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("llama-server health check returned status %d", resp.StatusCode)
+		return fmt.Errorf("inference server health check returned status %d", resp.StatusCode)
 	}
 	return nil
 }
 
 // ParseDeliberation parses structured thought, action, and completion status from model output.
-func ParseDeliberation(raw string) (thought string, action string, isComplete bool) {
+func ParseDeliberation(raw string) (thought, action string, isComplete bool) {
 	lines := strings.Split(raw, "\n")
 	var thoughtLines []string
 	var actionLines []string
@@ -179,41 +240,40 @@ func ParseDeliberation(raw string) (thought string, action string, isComplete bo
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
 		lower := strings.ToLower(trimmed)
 
-		if strings.HasPrefix(lower, "thought:") {
+		switch {
+		case strings.HasPrefix(lower, "thought:"):
 			mode = "thought"
-			thoughtLines = append(thoughtLines, strings.TrimSpace(trimmed[8:]))
-			continue
-		} else if strings.HasPrefix(lower, "action:") {
+			thoughtLines = append(thoughtLines, strings.TrimSpace(trimmed[len("thought:"):]))
+		case strings.HasPrefix(lower, "action:"):
 			mode = "action"
-			actionLines = append(actionLines, strings.TrimSpace(trimmed[7:]))
-			continue
-		} else if strings.HasPrefix(lower, "complete:") {
-			val := strings.TrimSpace(lower[9:])
+			actionLines = append(actionLines, strings.TrimSpace(trimmed[len("action:"):]))
+		case strings.HasPrefix(lower, "complete:"):
+			val := strings.TrimSpace(lower[len("complete:"):])
 			if strings.HasPrefix(val, "true") || strings.HasPrefix(val, "yes") {
 				isComplete = true
 			}
-			continue
-		}
-
-		if mode == "thought" && trimmed != "" {
-			thoughtLines = append(thoughtLines, trimmed)
-		} else if mode == "action" && trimmed != "" {
-			actionLines = append(actionLines, trimmed)
+		default:
+			if mode == "thought" {
+				thoughtLines = append(thoughtLines, trimmed)
+			} else if mode == "action" {
+				actionLines = append(actionLines, trimmed)
+			}
 		}
 	}
 
 	thought = strings.TrimSpace(strings.Join(thoughtLines, " "))
 	action = strings.TrimSpace(strings.Join(actionLines, " "))
 
-	// Fallback if model didn't format explicitly
 	if thought == "" && action == "" {
-		thought = raw
-		action = "Continue deliberation"
-	} else if action == "" {
-		action = "Next reasoning step"
+		return raw, "Continue deliberation", isComplete
 	}
-
+	if action == "" {
+		return thought, "Next reasoning step", isComplete
+	}
 	return thought, action, isComplete
 }

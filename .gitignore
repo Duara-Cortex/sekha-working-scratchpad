@@ -15,5 +15,8 @@ bin/
 # Go workspace file
 go.work
 
+# Environment configuration
+.env
+
 # OS metadata
 .DS_Store

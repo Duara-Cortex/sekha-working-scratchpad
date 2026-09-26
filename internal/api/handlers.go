@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
@@ -14,19 +13,26 @@ import (
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/scratchpad"
 )
 
+const (
+	defaultDeliberateTimeout = 60 * time.Second
+	defaultHealthTimeout     = 2 * time.Second
+)
+
 // Server encapsulates the working memory HTTP service and dependencies.
 type Server struct {
 	Store     *scratchpad.Store
-	Budgeter  *budgeter.ContextBudgeter
+	Budgeter  *budgeter.Budgeter
 	Engine    inference.Engine
 	mux       *http.ServeMux
 	startTime time.Time
+	nodeName  string
+	port      int
 }
 
 // NewServer initializes the deliberation scratchpad server.
-func NewServer(store *scratchpad.Store, bud *budgeter.ContextBudgeter, engine inference.Engine) *Server {
+func NewServer(store *scratchpad.Store, bud *budgeter.Budgeter, engine inference.Engine) *Server {
 	if bud == nil {
-		bud = budgeter.New(budgeter.DefaultBudgetConfig())
+		bud = budgeter.New(budgeter.DefaultConfig())
 	}
 	s := &Server{
 		Store:     store,
@@ -37,6 +43,12 @@ func NewServer(store *scratchpad.Store, bud *budgeter.ContextBudgeter, engine in
 	}
 	s.registerRoutes()
 	return s
+}
+
+// SetNodeInfo configures the runtime node identity and service port.
+func (s *Server) SetNodeInfo(nodeName string, port int) {
+	s.nodeName = nodeName
+	s.port = port
 }
 
 func (s *Server) registerRoutes() {
@@ -55,29 +67,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 	var req model.DeliberateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json request payload"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid json request payload")
 		return
 	}
 
-	// 1. Build budget-constrained prompt strictly and solely from incoming request
 	prompt := s.Budgeter.BuildPrompt(req)
 
-	// 2. Call inference engine
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), defaultDeliberateTimeout)
 	defer cancel()
 
-	output, err := s.Engine.Infer(ctx, prompt.SystemPrompt, prompt.UserPrompt, req.MaxTokens, req.Temperature)
+	output, err := s.Engine.Infer(ctx, inference.Request{
+		Model:        req.Model,
+		SystemPrompt: prompt.SystemPrompt,
+		UserPrompt:   prompt.UserPrompt,
+		MaxTokens:    req.MaxTokens,
+		Temperature:  req.Temperature,
+	})
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "error",
-			"error":  err.Error(),
-		})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// 3. Return structured deliberation response strictly isolated to this step
 	resp := model.DeliberateResponse{
 		Status:           "ok",
 		StepIndex:        1,
@@ -95,34 +105,23 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 		Timestamp:        time.Now(),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
-	snapshotIDStr := r.URL.Query().Get("snapshot_id")
 	snapshotID := -1
-	if snapshotIDStr != "" {
+	if snapshotIDStr := r.URL.Query().Get("snapshot_id"); snapshotIDStr != "" {
 		if id, err := strconv.Atoi(snapshotIDStr); err == nil {
 			snapshotID = id
 		}
 	}
 
-	err := s.Store.Rollback(snapshotID)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status": "error",
-			"error":  err.Error(),
-		})
+	if err := s.Store.Rollback(snapshotID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "rolled_back",
 		"message": "working memory restored to snapshot",
 		"state":   s.Store.GetState(),
@@ -133,53 +132,55 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Description string `json:"description"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	if body.Description == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Description == "" {
 		body.Description = "Manual snapshot"
 	}
 
 	snapID := s.Store.CreateSnapshot(body.Description)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "ok",
 		"snapshot_id": snapID,
 		"description": body.Description,
 	})
 }
 
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats := s.Store.GetTelemetry()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(stats)
+func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Store.GetTelemetry())
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), defaultHealthTimeout)
 	defer cancel()
 
 	llamaStatus := "reachable"
+	status := "healthy"
 	if err := s.Engine.Health(ctx); err != nil {
 		llamaStatus = "unreachable: " + err.Error()
-	}
-
-	status := "healthy"
-	httpStatus := http.StatusOK
-	if strings.HasPrefix(llamaStatus, "unreachable") {
 		status = "degraded"
-		// Still return 200 for healthz so scratchpad daemon itself stays alive
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(httpStatus)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":          status,
 		"service":         "sekha-working-scratchpad",
-		"node":            "sekha-node2",
-		"port":            8083,
+		"node":            s.nodeName,
+		"port":            s.port,
 		"uptime_seconds":  int64(time.Since(s.startTime).Seconds()),
 		"llama_inference": llamaStatus,
 		"timestamp":       time.Now(),
+	})
+}
+
+func writeJSON(w http.ResponseWriter, statusCode int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		http.Error(w, `{"error":"failed to encode response"}`, http.StatusInternalServerError)
+	}
+}
+
+func writeError(w http.ResponseWriter, statusCode int, message string) {
+	writeJSON(w, statusCode, map[string]string{
+		"status": "error",
+		"error":  message,
 	})
 }

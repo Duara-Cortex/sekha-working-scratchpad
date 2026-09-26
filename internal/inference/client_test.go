@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestParseDeliberation(t *testing.T) {
@@ -16,18 +17,20 @@ Complete: false`
 
 	thought, action, complete := ParseDeliberation(raw)
 
-	if !complete == false {
+	if complete {
 		t.Fatalf("expected complete=false")
 	}
-	if thought != "The sensor data indicates an unhandled voltage drop on the bus. We need to check whether the threshold was breached." {
+	expectedThought := "The sensor data indicates an unhandled voltage drop on the bus. We need to check whether the threshold was breached."
+	if thought != expectedThought {
 		t.Fatalf("unexpected parsed thought: %s", thought)
 	}
-	if action != "Query Node 1 for historical voltage drop incidents" {
+	expectedAction := "Query Node 1 for historical voltage drop incidents"
+	if action != expectedAction {
 		t.Fatalf("unexpected parsed action: %s", action)
 	}
 }
 
-func TestLlamaClient_Infer(t *testing.T) {
+func TestClient_Infer(t *testing.T) {
 	var receivedReq openAIChatRequest
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -64,12 +67,22 @@ func TestLlamaClient_Infer(t *testing.T) {
 		resp.Timings.PredictedPerSecond = 12.4
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("failed to encode mock response: %v", err)
+		}
 	}))
 	defer ts.Close()
 
-	client := NewClient(ts.URL, 0)
-	out, err := client.Infer(context.Background(), "System prompt", "User prompt", 128, 0.2)
+	client, err := NewClient(ts.URL, "qwen2.5-1.5b-instruct", 5*time.Second)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	out, err := client.Infer(context.Background(), Request{
+		SystemPrompt: "System prompt",
+		UserPrompt:   "User prompt",
+		MaxTokens:    128,
+		Temperature:  0.2,
+	})
 	if err != nil {
 		t.Fatalf("Infer failed: %v", err)
 	}
@@ -98,5 +111,17 @@ func TestLlamaClient_Infer(t *testing.T) {
 	}
 	if out.PromptTPS != 31.5 || out.PredictedTPS != 12.4 {
 		t.Fatalf("unexpected timings: %f, %f", out.PromptTPS, out.PredictedTPS)
+	}
+}
+
+func TestNewClient_RequiresConfig(t *testing.T) {
+	if _, err := NewClient("", "model", 5*time.Second); err == nil {
+		t.Errorf("expected error when BaseURL is empty, got nil")
+	}
+	if _, err := NewClient("http://localhost:8080", "", 5*time.Second); err == nil {
+		t.Errorf("expected error when Model is empty, got nil")
+	}
+	if _, err := NewClient("http://localhost:8080", "model", 0); err == nil {
+		t.Errorf("expected error when Timeout is <= 0, got nil")
 	}
 }
