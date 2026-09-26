@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
@@ -15,11 +16,15 @@ import (
 )
 
 type mockEngine struct {
-	output *inference.DeliberationOutput
-	err    error
+	output      *inference.DeliberationOutput
+	err         error
+	calls       int
+	userPrompts []string
 }
 
 func (m *mockEngine) Infer(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (*inference.DeliberationOutput, error) {
+	m.calls++
+	m.userPrompts = append(m.userPrompts, userPrompt)
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -30,7 +35,7 @@ func (m *mockEngine) Health(ctx context.Context) error {
 	return nil
 }
 
-func TestServer_DeliberateAndScratchpad(t *testing.T) {
+func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 	store := scratchpad.NewStore()
 	bud := budgeter.New(budgeter.DefaultBudgetConfig())
 	mock := &mockEngine{
@@ -48,75 +53,169 @@ func TestServer_DeliberateAndScratchpad(t *testing.T) {
 	}
 	server := NewServer(store, bud, mock)
 
-	// 1. Deliberate
-	reqBody := model.DeliberateRequest{
-		Objective: "Isolate network jitter",
+	// Call 1: First deliberation with Task 1
+	reqBody1 := model.DeliberateRequest{
+		Objective: "Task 1: Isolate network jitter",
 		SensoryChunks: []model.SensoryChunk{
 			{ID: "c1", Text: "packet delay > 5ms", Salience: 0.8},
 		},
 		LongTermContext: []string{"Switch port 2 links to Node 3"},
+		Observation:     "Ping 192.168.8.183 succeeded with high jitter",
+	}
+	data1, _ := json.Marshal(reqBody1)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data1))
+	w1 := httptest.NewRecorder()
+	server.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("call 1: expected status 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	var resp1 model.DeliberateResponse
+	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("call 1: failed to decode response: %v", err)
+	}
+
+	if resp1.Status != "ok" {
+		t.Fatalf("call 1: expected status 'ok', got %s", resp1.Status)
+	}
+	if resp1.StepIndex != 1 {
+		t.Fatalf("call 1: expected step index 1, got %d", resp1.StepIndex)
+	}
+	if resp1.TrajectoryLength != 1 {
+		t.Fatalf("call 1: expected trajectory length 1, got %d", resp1.TrajectoryLength)
+	}
+	if resp1.ActiveGoal != "Task 1: Isolate network jitter" {
+		t.Fatalf("call 1: unexpected active goal: %s", resp1.ActiveGoal)
+	}
+	if resp1.Thought != "Examine sensory log" {
+		t.Fatalf("call 1: unexpected thought: %s", resp1.Thought)
+	}
+	if resp1.ProposedAction != "Read buffer chunk c1" {
+		t.Fatalf("call 1: unexpected proposed action: %s", resp1.ProposedAction)
+	}
+	if resp1.PromptTokens != 50 || resp1.CompletionTokens != 20 || resp1.TotalTokens != 70 {
+		t.Fatalf("call 1: unexpected token counts: %d, %d, %d", resp1.PromptTokens, resp1.CompletionTokens, resp1.TotalTokens)
+	}
+
+	// Verify store was not mutated
+	storeState := store.GetState()
+	if len(storeState.Trajectory) != 0 {
+		t.Fatalf("call 1: store trajectory should be empty, got %d steps", len(storeState.Trajectory))
+	}
+	if storeState.ActiveGoal != "" {
+		t.Fatalf("call 1: store active goal should be empty, got %s", storeState.ActiveGoal)
+	}
+
+	// Call 2: Second deliberation with completely different Task 2
+	reqBody2 := model.DeliberateRequest{
+		Objective: "Task 2: Diagnose CPU thermal throttling",
+		SensoryChunks: []model.SensoryChunk{
+			{ID: "c2", Text: "core temp reached 85C", Salience: 0.95},
+		},
+		LongTermContext: []string{"Thermal throttling threshold is 80C"},
+		Observation:     "CPU clock scaled down to 600MHz",
+	}
+	data2, _ := json.Marshal(reqBody2)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data2))
+	w2 := httptest.NewRecorder()
+	server.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("call 2: expected status 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	var resp2 model.DeliberateResponse
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("call 2: failed to decode response: %v", err)
+	}
+
+	if resp2.Status != "ok" {
+		t.Fatalf("call 2: expected status 'ok', got %s", resp2.Status)
+	}
+	if resp2.StepIndex != 1 {
+		t.Fatalf("call 2: expected step index 1, got %d", resp2.StepIndex)
+	}
+	if resp2.TrajectoryLength != 1 {
+		t.Fatalf("call 2: expected trajectory length 1, got %d", resp2.TrajectoryLength)
+	}
+	if resp2.ActiveGoal != "Task 2: Diagnose CPU thermal throttling" {
+		t.Fatalf("call 2: unexpected active goal: %s", resp2.ActiveGoal)
+	}
+
+	// Verify prompt isolation between consecutive calls
+	if len(mock.userPrompts) != 2 {
+		t.Fatalf("expected 2 engine calls, got %d", len(mock.userPrompts))
+	}
+	prompt1 := mock.userPrompts[0]
+	prompt2 := mock.userPrompts[1]
+
+	// Prompt 1 must contain Call 1 details
+	if !strings.Contains(prompt1, "Task 1: Isolate network jitter") ||
+		!strings.Contains(prompt1, "packet delay > 5ms") ||
+		!strings.Contains(prompt1, "Switch port 2 links to Node 3") ||
+		!strings.Contains(prompt1, "high jitter") {
+		t.Fatalf("prompt 1 missing call 1 details: %s", prompt1)
+	}
+
+	// Prompt 2 must contain Call 2 details
+	if !strings.Contains(prompt2, "Task 2: Diagnose CPU thermal throttling") ||
+		!strings.Contains(prompt2, "core temp reached 85C") ||
+		!strings.Contains(prompt2, "Thermal throttling threshold is 80C") ||
+		!strings.Contains(prompt2, "scaled down to 600MHz") {
+		t.Fatalf("prompt 2 missing call 2 details: %s", prompt2)
+	}
+
+	// Prompt 2 MUST NOT contain any Call 1 details (strict isolation)
+	if strings.Contains(prompt2, "Task 1") ||
+		strings.Contains(prompt2, "packet delay") ||
+		strings.Contains(prompt2, "Switch port 2") ||
+		strings.Contains(prompt2, "high jitter") {
+		t.Fatalf("prompt 2 leaked call 1 state: %s", prompt2)
+	}
+
+	// Store must still be completely unmutated
+	finalStoreState := store.GetState()
+	if len(finalStoreState.Trajectory) != 0 {
+		t.Fatalf("store trajectory leaked state: %d steps", len(finalStoreState.Trajectory))
+	}
+	if finalStoreState.ActiveGoal != "" {
+		t.Fatalf("store active goal leaked state: %s", finalStoreState.ActiveGoal)
+	}
+}
+
+func TestServer_DeliberateInferenceError(t *testing.T) {
+	store := scratchpad.NewStore()
+	bud := budgeter.New(budgeter.DefaultBudgetConfig())
+	mock := &mockEngine{
+		err: context.DeadlineExceeded,
+	}
+	server := NewServer(store, bud, mock)
+
+	reqBody := model.DeliberateRequest{
+		Objective: "Failing task",
 	}
 	data, _ := json.Marshal(reqBody)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data))
 	w := httptest.NewRecorder()
-
 	server.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
 	}
 
-	var resp model.DeliberateResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode deliberate response: %v", err)
+	var errResp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp["status"] != "error" {
+		t.Fatalf("expected status 'error', got %s", errResp["status"])
 	}
 
-	if resp.StepIndex != 1 {
-		t.Fatalf("expected step index 1, got %d", resp.StepIndex)
-	}
-	if resp.Thought != "Examine sensory log" {
-		t.Fatalf("unexpected thought: %s", resp.Thought)
-	}
-	if resp.ProposedAction != "Read buffer chunk c1" {
-		t.Fatalf("unexpected action: %s", resp.ProposedAction)
-	}
-
-	// 2. Query Scratchpad
-	reqGet := httptest.NewRequest(http.MethodGet, "/api/v1/working/scratchpad", nil)
-	wGet := httptest.NewRecorder()
-	server.ServeHTTP(wGet, reqGet)
-
-	if wGet.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", wGet.Code)
-	}
-
-	var state model.WorkingMemoryState
-	if err := json.NewDecoder(wGet.Body).Decode(&state); err != nil {
-		t.Fatalf("failed to decode state: %v", err)
-	}
-
-	if state.ActiveGoal != "Isolate network jitter" {
-		t.Fatalf("unexpected active goal: %s", state.ActiveGoal)
-	}
-	if len(state.Trajectory) != 1 {
-		t.Fatalf("expected trajectory length 1, got %d", len(state.Trajectory))
-	}
-	if len(state.SensoryContext) != 1 {
-		t.Fatalf("expected 1 sensory chunk, got %d", len(state.SensoryContext))
-	}
-
-	// 3. Clear Scratchpad
-	reqClear := httptest.NewRequest(http.MethodPost, "/api/v1/working/clear", nil)
-	wClear := httptest.NewRecorder()
-	server.ServeHTTP(wClear, reqClear)
-
-	if wClear.Code != http.StatusOK {
-		t.Fatalf("expected clear 200, got %d", wClear.Code)
-	}
-
-	clearedState := store.GetState()
-	if clearedState.ActiveGoal != "" || len(clearedState.Trajectory) != 0 {
-		t.Fatalf("scratchpad not cleared properly")
+	// Verify store was not mutated on inference failure
+	state := store.GetState()
+	if len(state.Trajectory) != 0 {
+		t.Fatalf("expected 0 trajectory steps on error, got %d", len(state.Trajectory))
 	}
 }
 

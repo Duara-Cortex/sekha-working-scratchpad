@@ -41,8 +41,6 @@ func NewServer(store *scratchpad.Store, bud *budgeter.ContextBudgeter, engine in
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/working/deliberate", s.handleDeliberate)
-	s.mux.HandleFunc("GET /api/v1/working/scratchpad", s.handleGetScratchpad)
-	s.mux.HandleFunc("POST /api/v1/working/clear", s.handleClear)
 	s.mux.HandleFunc("POST /api/v1/working/rollback", s.handleRollback)
 	s.mux.HandleFunc("POST /api/v1/working/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/v1/working/stats", s.handleStats)
@@ -61,32 +59,15 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Update working memory with new goal or context
-	if req.Objective != "" {
-		s.Store.SetGoal(req.Objective)
-	}
-	if len(req.SensoryChunks) > 0 {
-		s.Store.IngestSensory(req.SensoryChunks)
-	}
-	if len(req.LongTermContext) > 0 {
-		s.Store.IngestLongTerm(req.LongTermContext)
-	}
+	// 1. Build budget-constrained prompt strictly and solely from incoming request
+	prompt := s.Budgeter.BuildPrompt(req)
 
-	// 2. Snapshot current state before step for isolation
-	s.Store.CreateSnapshot("Pre-step automatic snapshot")
-
-	// 3. Build budget-constrained prompt
-	state := s.Store.GetState()
-	prompt := s.Budgeter.BuildPrompt(state, req.Observation)
-	s.Store.SetTokenEstimate(prompt.EstimatedTotal)
-
-	// 4. Call inference engine
+	// 2. Call inference engine
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
 	output, err := s.Engine.Infer(ctx, prompt.SystemPrompt, prompt.UserPrompt, req.MaxTokens, req.Temperature)
 	if err != nil {
-		s.Store.AddStep("Inference error occurred", err.Error(), model.StepStatusError)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -96,56 +77,27 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Record deliberation step in trajectory
-	stepStatus := model.StepStatusProposed
-	if output.IsComplete {
-		stepStatus = model.StepStatusSuccess
-	}
-	stepIdx := s.Store.AddStep(output.Thought, output.Action, stepStatus)
-
-	if req.Observation != "" && stepIdx > 1 {
-		_ = s.Store.RecordObservation(stepIdx-1, req.Observation, true)
-	}
-
-	// 6. Return structured deliberation response
-	updatedState := s.Store.GetState()
+	// 3. Return structured deliberation response strictly isolated to this step
 	resp := model.DeliberateResponse{
 		Status:           "ok",
-		StepIndex:        stepIdx,
+		StepIndex:        1,
 		Thought:          output.Thought,
 		ProposedAction:   output.Action,
 		IsComplete:       output.IsComplete,
-		CandidateActions: updatedState.CandidateActions,
+		CandidateActions: []model.CandidateAction{},
 		PromptTokens:     output.PromptTokens,
 		CompletionTokens: output.CompletionTokens,
 		TotalTokens:      output.TotalTokens,
 		EvaluationRate:   output.PromptTPS,
 		GenerationRate:   output.PredictedTPS,
-		ActiveGoal:       updatedState.ActiveGoal,
-		TrajectoryLength: len(updatedState.Trajectory),
+		ActiveGoal:       req.Objective,
+		TrajectoryLength: 1,
 		Timestamp:        time.Now(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func (s *Server) handleGetScratchpad(w http.ResponseWriter, r *http.Request) {
-	state := s.Store.GetState()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(state)
-}
-
-func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
-	s.Store.Clear()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "cleared",
-		"message": "working memory scratchpad reset",
-	})
 }
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
