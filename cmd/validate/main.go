@@ -177,7 +177,7 @@ func main() {
 	fmt.Printf(" Target Service: %s\n", targetURL)
 	fmt.Println("================================================================")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
 
 	// Step 0: Health check
 	var healthResp map[string]interface{}
