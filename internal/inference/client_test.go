@@ -28,9 +28,15 @@ Complete: false`
 }
 
 func TestLlamaClient_Infer(t *testing.T) {
+	var receivedReq openAIChatRequest
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
+			return
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&receivedReq); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -66,6 +72,16 @@ func TestLlamaClient_Infer(t *testing.T) {
 	out, err := client.Infer(context.Background(), "System prompt", "User prompt", 128, 0.2)
 	if err != nil {
 		t.Fatalf("Infer failed: %v", err)
+	}
+
+	if len(receivedReq.Messages) != 2 {
+		t.Fatalf("expected exactly 2 messages in single-turn payload, got %d", len(receivedReq.Messages))
+	}
+	if receivedReq.Messages[0].Role != "system" || receivedReq.Messages[0].Content != "System prompt" {
+		t.Fatalf("unexpected system message: %+v", receivedReq.Messages[0])
+	}
+	if receivedReq.Messages[1].Role != "user" || receivedReq.Messages[1].Content != "User prompt" {
+		t.Fatalf("unexpected user message: %+v", receivedReq.Messages[1])
 	}
 
 	if !out.IsComplete {

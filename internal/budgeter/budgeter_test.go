@@ -10,25 +10,18 @@ import (
 func TestBudgeter_BasicPrompt(t *testing.T) {
 	b := New(DefaultBudgetConfig())
 
-	state := model.WorkingMemoryState{
-		ActiveGoal: "Diagnose CPU throttling on Node 2",
-		SensoryContext: []model.SensoryChunk{
+	req := model.DeliberateRequest{
+		Objective: "Diagnose CPU throttling on Node 2",
+		SensoryChunks: []model.SensoryChunk{
 			{ID: "s1", Text: "vcgencmd measure_temp reports 48.3C", Salience: 0.9},
 		},
 		LongTermContext: []string{
 			"Node 2 PMIC can brown out if running 4 threads simultaneously",
 		},
-		Trajectory: []model.ReasoningStep{
-			{
-				StepIndex: 1,
-				Thought:   "Check thread allocation of llama-server",
-				Action:    "inspect systemd service unit",
-				Status:    model.StepStatusSuccess,
-			},
-		},
+		Observation: "Service configured with --threads 2",
 	}
 
-	prompt := b.BuildPrompt(state, "Service configured with --threads 2")
+	prompt := b.BuildPrompt(req)
 
 	if !strings.Contains(prompt.SystemPrompt, "Working Memory Deliberation Engine") {
 		t.Fatalf("system prompt missing key role identifier")
@@ -42,8 +35,11 @@ func TestBudgeter_BasicPrompt(t *testing.T) {
 	if !strings.Contains(prompt.UserPrompt, "brown out") {
 		t.Fatalf("long term context missing")
 	}
-	if !strings.Contains(prompt.UserPrompt, "Step 1") {
-		t.Fatalf("trajectory missing")
+	if !strings.Contains(prompt.UserPrompt, "CURRENT OBSERVATION") {
+		t.Fatalf("observation header missing")
+	}
+	if !strings.Contains(prompt.UserPrompt, "Service configured with --threads 2") {
+		t.Fatalf("observation content missing")
 	}
 	if prompt.EstimatedTotal > prompt.BudgetLimit {
 		t.Fatalf("prompt exceeded budget limit: %d > %d", prompt.EstimatedTotal, prompt.BudgetLimit)
@@ -63,7 +59,7 @@ func TestBudgeter_OverflowEnforcement(t *testing.T) {
 	}
 	b := New(cfg)
 
-	// Create large state
+	// Create large request
 	var chunks []model.SensoryChunk
 	for i := 0; i < 50; i++ {
 		chunks = append(chunks, model.SensoryChunk{
@@ -73,12 +69,13 @@ func TestBudgeter_OverflowEnforcement(t *testing.T) {
 		})
 	}
 
-	state := model.WorkingMemoryState{
-		ActiveGoal:     "Perform load test under constrained memory",
-		SensoryContext: chunks,
+	req := model.DeliberateRequest{
+		Objective:     "Perform load test under constrained memory",
+		SensoryChunks: chunks,
+		Observation:   strings.Repeat("very long observation details ", 10),
 	}
 
-	prompt := b.BuildPrompt(state, "")
+	prompt := b.BuildPrompt(req)
 	// Ensure system prompt is intact
 	if !strings.Contains(prompt.SystemPrompt, "Working Memory Deliberation Engine") {
 		t.Fatalf("system prompt truncated")

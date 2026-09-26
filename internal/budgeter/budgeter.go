@@ -9,8 +9,8 @@ import (
 
 // Default budget constraints for Qwen2.5-1.5B-Instruct on ARM NEON.
 const (
-	DefaultContextLimit = 2048
-	DefaultOutputReserve = 256
+	DefaultContextLimit    = 2048
+	DefaultOutputReserve   = 256
 	CharsPerTokenHeuristic = 3.8
 )
 
@@ -28,7 +28,7 @@ type BudgetConfig struct {
 // DefaultBudgetConfig returns a balanced 2,048-token configuration.
 func DefaultBudgetConfig() BudgetConfig {
 	return BudgetConfig{
-		MaxContextTokens: DefaultContextLimit, // 2048
+		MaxContextTokens: DefaultContextLimit,  // 2048
 		OutputReserve:    DefaultOutputReserve, // 256
 		SystemBudget:     320,                  // Never truncated
 		GoalBudget:       150,
@@ -73,29 +73,29 @@ type FormattedPrompt struct {
 	BudgetLimit    int
 }
 
-// BuildPrompt constructs a strictly budget-compliant prompt from working memory state.
-func (b *ContextBudgeter) BuildPrompt(state model.WorkingMemoryState, currentObservation string) FormattedPrompt {
+// BuildPrompt constructs a strictly budget-compliant prompt from the incoming deliberation request.
+func (b *ContextBudgeter) BuildPrompt(req model.DeliberateRequest) FormattedPrompt {
 	systemPrompt := b.buildSystemPrompt()
 
 	// 1. Goal Section
-	goalText := strings.TrimSpace(state.ActiveGoal)
+	goalText := strings.TrimSpace(req.Objective)
 	if goalText == "" {
 		goalText = "Perform step-by-step cognitive analysis and plan the next action."
 	}
 	goalSection := fmt.Sprintf("### ACTIVE TASK GOAL\n%s\n", b.truncateText(goalText, b.cfg.GoalBudget))
 
 	// 2. Sensory Section (prioritize highest salience / recent)
-	sensorySection := b.formatSensorySection(state.SensoryContext, b.cfg.SensoryBudget)
+	sensorySection := b.formatSensorySection(req.SensoryChunks, b.cfg.SensoryBudget)
 
 	// 3. Long-Term Knowledge Section
-	ltmSection := b.formatLongTermSection(state.LongTermContext, b.cfg.LongTermBudget)
+	ltmSection := b.formatLongTermSection(req.LongTermContext, b.cfg.LongTermBudget)
 
-	// 4. Trajectory Section (rolling window of recent deliberation steps)
-	trajSection := b.formatTrajectorySection(state.Trajectory, currentObservation, b.cfg.TrajectoryBudget)
+	// 4. Observation Section
+	obsSection := b.formatObservationSection(req.Observation, b.cfg.TrajectoryBudget)
 
 	// 5. Action Instruction
 	instruction := `### DELIBERATION INSTRUCTION
-Analyze the active goal, sensory signals, retrieved context, and previous steps.
+Analyze the active goal, sensory signals, retrieved context, and observations.
 Formulate your internal chain of thought, followed by the next discrete action or decision.
 Format your response strictly as:
 Thought: <internal monologue, hypothesis testing, error check>
@@ -113,8 +113,8 @@ Complete: <true if goal achieved, false if more deliberation needed>`
 		userBuilder.WriteString(ltmSection)
 		userBuilder.WriteString("\n")
 	}
-	if trajSection != "" {
-		userBuilder.WriteString(trajSection)
+	if obsSection != "" {
+		userBuilder.WriteString(obsSection)
 		userBuilder.WriteString("\n")
 	}
 	userBuilder.WriteString(instruction)
@@ -188,40 +188,16 @@ func (b *ContextBudgeter) formatLongTermSection(facts []string, budgetTokens int
 	return sb.String()
 }
 
-func (b *ContextBudgeter) formatTrajectorySection(steps []model.ReasoningStep, currentObs string, budgetTokens int) string {
-	if len(steps) == 0 && currentObs == "" {
+func (b *ContextBudgeter) formatObservationSection(currentObs string, budgetTokens int) string {
+	currentObs = strings.TrimSpace(currentObs)
+	if currentObs == "" {
 		return ""
 	}
 
 	var sb strings.Builder
-	sb.WriteString("### DELIBERATION TRAJECTORY (Past Steps)\n")
-
-	// Keep rolling window of steps that fit in budgetTokens
-	var stepStrs []string
-	accumulated := 0
-	for i := len(steps) - 1; i >= 0; i-- {
-		s := steps[i]
-		line := fmt.Sprintf("Step %d [%s]:\n  Thought: %s\n  Action: %s", s.StepIndex, s.Status, s.Thought, s.Action)
-		if s.Observation != "" {
-			line += fmt.Sprintf("\n  Observation: %s", s.Observation)
-		}
-		t := EstimateTokens(line)
-		if accumulated+t > budgetTokens && len(stepStrs) > 0 {
-			break
-		}
-		stepStrs = append([]string{line}, stepStrs...)
-		accumulated += t
-	}
-
-	for _, s := range stepStrs {
-		sb.WriteString(s)
-		sb.WriteString("\n\n")
-	}
-
-	if currentObs != "" {
-		sb.WriteString(fmt.Sprintf("Latest Observation: %s\n", currentObs))
-	}
-
+	sb.WriteString("### CURRENT OBSERVATION\n")
+	sb.WriteString(b.truncateText(currentObs, budgetTokens))
+	sb.WriteString("\n")
 	return sb.String()
 }
 
