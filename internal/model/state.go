@@ -4,19 +4,28 @@ import (
 	"time"
 )
 
+// Status represents the operational lifecycle status of working memory.
+type Status string
+
 // Status constants for reasoning steps and working memory lifecycle.
 const (
-	StatusIdle         = "idle"
-	StatusDeliberating = "deliberating"
-	StatusReady        = "ready"
-	StatusError        = "error"
-	StatusCompleted    = "completed"
+	StatusIdle         Status = "idle"
+	StatusDeliberating Status = "deliberating"
+	StatusReady        Status = "ready"
+	StatusError        Status = "error"
+	StatusCompleted    Status = "completed"
+)
 
-	StepStatusProposed  = "proposed"
-	StepStatusExecuting = "executing"
-	StepStatusSuccess   = "success"
-	StepStatusError     = "error"
-	StepStatusRolledBack= "rolled_back"
+// StepStatus represents the progression status of an individual reasoning step.
+type StepStatus string
+
+// StepStatus constants for individual reasoning step transitions.
+const (
+	StepStatusProposed   StepStatus = "proposed"
+	StepStatusExecuting  StepStatus = "executing"
+	StepStatusSuccess    StepStatus = "success"
+	StepStatusError      StepStatus = "error"
+	StepStatusRolledBack StepStatus = "rolled_back"
 )
 
 // SensoryChunk represents a filtered, high-salience text piece from Node 3.
@@ -30,21 +39,21 @@ type SensoryChunk struct {
 
 // ReasoningStep captures a single deliberate reasoning step in the trajectory.
 type ReasoningStep struct {
-	StepIndex   int       `json:"step_index"`
-	Thought     string    `json:"thought"`
-	Action      string    `json:"action,omitempty"`
-	Observation string    `json:"observation,omitempty"`
-	Status      string    `json:"status"`
-	Timestamp   time.Time `json:"timestamp"`
+	StepIndex   int        `json:"step_index"`
+	Thought     string     `json:"thought"`
+	Action      string     `json:"action,omitempty"`
+	Observation string     `json:"observation,omitempty"`
+	Status      StepStatus `json:"status"`
+	Timestamp   time.Time  `json:"timestamp"`
 }
 
 // CandidateAction represents an uncommitted proposed action or tool call.
 type CandidateAction struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`
-	Payload     map[string]interface{} `json:"payload,omitempty"`
-	Committed   bool                   `json:"committed"`
-	CreatedAt   time.Time              `json:"created_at"`
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Payload   map[string]interface{} `json:"payload,omitempty"`
+	Committed bool                   `json:"committed"`
+	CreatedAt time.Time              `json:"created_at"`
 }
 
 // WorkingMemoryState is the core active deliberation state on Node 2.
@@ -55,7 +64,7 @@ type WorkingMemoryState struct {
 	LongTermContext  []string          `json:"long_term_context"`
 	Trajectory       []ReasoningStep   `json:"trajectory"`
 	CandidateActions []CandidateAction `json:"candidate_actions"`
-	Status           string            `json:"status"`
+	Status           Status            `json:"status"`
 	TokenEstimate    int               `json:"token_estimate"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
@@ -71,12 +80,13 @@ type Snapshot struct {
 
 // DeliberateRequest defines the input payload for POST /api/v1/working/deliberate.
 type DeliberateRequest struct {
-	Objective        string            `json:"objective"`
-	SensoryChunks    []SensoryChunk    `json:"sensory_chunks,omitempty"`
-	LongTermContext  []string          `json:"long_term_context,omitempty"`
-	Observation      string            `json:"observation,omitempty"`
-	MaxTokens        int               `json:"max_tokens,omitempty"`
-	Temperature      float64           `json:"temperature,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	Objective       string         `json:"objective"`
+	SensoryChunks   []SensoryChunk `json:"sensory_chunks,omitempty"`
+	LongTermContext []string       `json:"long_term_context,omitempty"`
+	Observation     string         `json:"observation,omitempty"`
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	Temperature     float64        `json:"temperature,omitempty"`
 }
 
 // DeliberateResponse is returned upon step completion.
@@ -99,14 +109,14 @@ type DeliberateResponse struct {
 
 // ScratchpadTelemetry provides high-level memory stats for cluster telemetry.
 type ScratchpadTelemetry struct {
-	ActiveSessions    int       `json:"active_sessions"`
-	ActiveGoal        string    `json:"active_goal"`
-	SensoryItemsCount int       `json:"sensory_items_count"`
-	LongTermFactsCount int      `json:"long_term_facts_count"`
-	TrajectorySteps   int       `json:"trajectory_steps"`
-	CandidateActions  int       `json:"candidate_actions"`
-	SnapshotCount     int       `json:"snapshot_count"`
-	EstContextTokens  int       `json:"est_context_tokens"`
-	UptimeSeconds     int64     `json:"uptime_seconds"`
-	LastUpdated       time.Time `json:"last_updated"`
+	ActiveSessions     int       `json:"active_sessions"`
+	ActiveGoal         string    `json:"active_goal"`
+	SensoryItemsCount  int       `json:"sensory_items_count"`
+	LongTermFactsCount int       `json:"long_term_facts_count"`
+	TrajectorySteps    int       `json:"trajectory_steps"`
+	CandidateActions   int       `json:"candidate_actions"`
+	SnapshotCount      int       `json:"snapshot_count"`
+	EstContextTokens   int       `json:"est_context_tokens"`
+	UptimeSeconds      int64     `json:"uptime_seconds"`
+	LastUpdated        time.Time `json:"last_updated"`
 }

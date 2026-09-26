@@ -22,22 +22,22 @@ type mockEngine struct {
 	userPrompts []string
 }
 
-func (m *mockEngine) Infer(ctx context.Context, systemPrompt, userPrompt string, maxTokens int, temperature float64) (*inference.DeliberationOutput, error) {
+func (m *mockEngine) Infer(_ context.Context, req inference.Request) (*inference.DeliberationOutput, error) {
 	m.calls++
-	m.userPrompts = append(m.userPrompts, userPrompt)
+	m.userPrompts = append(m.userPrompts, req.UserPrompt)
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.output, nil
 }
 
-func (m *mockEngine) Health(ctx context.Context) error {
+func (m *mockEngine) Health(_ context.Context) error {
 	return nil
 }
 
 func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 	store := scratchpad.NewStore()
-	bud := budgeter.New(budgeter.DefaultBudgetConfig())
+	bud := budgeter.New(budgeter.DefaultConfig())
 	mock := &mockEngine{
 		output: &inference.DeliberationOutput{
 			RawContent:       "Thought: Examine sensory log\nAction: Read buffer chunk c1\nComplete: false",
@@ -62,7 +62,10 @@ func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 		LongTermContext: []string{"Switch port 2 links to Node 3"},
 		Observation:     "Ping 192.168.8.183 succeeded with high jitter",
 	}
-	data1, _ := json.Marshal(reqBody1)
+	data1, err := json.Marshal(reqBody1)
+	if err != nil {
+		t.Fatalf("failed to marshal request 1: %v", err)
+	}
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data1))
 	w1 := httptest.NewRecorder()
 	server.ServeHTTP(w1, req1)
@@ -116,7 +119,10 @@ func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 		LongTermContext: []string{"Thermal throttling threshold is 80C"},
 		Observation:     "CPU clock scaled down to 600MHz",
 	}
-	data2, _ := json.Marshal(reqBody2)
+	data2, err := json.Marshal(reqBody2)
+	if err != nil {
+		t.Fatalf("failed to marshal request 2: %v", err)
+	}
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data2))
 	w2 := httptest.NewRecorder()
 	server.ServeHTTP(w2, req2)
@@ -186,7 +192,7 @@ func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 
 func TestServer_DeliberateInferenceError(t *testing.T) {
 	store := scratchpad.NewStore()
-	bud := budgeter.New(budgeter.DefaultBudgetConfig())
+	bud := budgeter.New(budgeter.DefaultConfig())
 	mock := &mockEngine{
 		err: context.DeadlineExceeded,
 	}
@@ -195,7 +201,10 @@ func TestServer_DeliberateInferenceError(t *testing.T) {
 	reqBody := model.DeliberateRequest{
 		Objective: "Failing task",
 	}
-	data, _ := json.Marshal(reqBody)
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", bytes.NewReader(data))
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
@@ -221,7 +230,7 @@ func TestServer_DeliberateInferenceError(t *testing.T) {
 
 func TestServer_RollbackEndpoint(t *testing.T) {
 	store := scratchpad.NewStore()
-	bud := budgeter.New(budgeter.DefaultBudgetConfig())
+	bud := budgeter.New(budgeter.DefaultConfig())
 	mock := &mockEngine{
 		output: &inference.DeliberationOutput{
 			Thought: "Step 1 good", Action: "Do step 1", IsComplete: false,
@@ -229,7 +238,6 @@ func TestServer_RollbackEndpoint(t *testing.T) {
 	}
 	server := NewServer(store, bud, mock)
 
-	// Step 1
 	store.SetGoal("Test rollback")
 	store.AddStep("Step 1 good", "Do step 1", model.StepStatusSuccess)
 	snapID := store.CreateSnapshot("Baseline")
@@ -237,10 +245,8 @@ func TestServer_RollbackEndpoint(t *testing.T) {
 		t.Fatalf("expected snapID 1, got %d", snapID)
 	}
 
-	// Step 2 (faulty)
 	store.AddStep("Step 2 bad", "crash", model.StepStatusError)
 
-	// Trigger rollback endpoint
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/rollback?snapshot_id=1", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)

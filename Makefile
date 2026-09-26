@@ -5,6 +5,8 @@ VALIDATE_NAME=sekha-scratchpad-validate
 NODE2_HOST=192.168.8.175
 NODE2_USER=admin
 
+ENV_FILE ?= .env
+
 all: check-go build
 
 check-go:
@@ -30,6 +32,15 @@ build-arm64: check-go
 install: build
 	sudo systemctl stop sekha-working-scratchpad.service 2>/dev/null || true
 	sudo cp bin/$(BINARY_NAME) /usr/local/bin/
+	@if [ -n "$(ENV_FILE)" ] && [ -f "$(ENV_FILE)" ]; then \
+		echo "Installing environment configuration from $(ENV_FILE) to /etc/default/sekha..."; \
+		sudo mkdir -p /etc/default; \
+		sudo cp $(ENV_FILE) /etc/default/sekha; \
+	elif [ -f /etc/default/sekha ]; then \
+		echo "Preserving existing /etc/default/sekha configuration."; \
+	else \
+		echo "No environment file specified or found; proceeding without external embedding configuration."; \
+	fi
 	sudo cp systemd/sekha-working-scratchpad.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl restart sekha-working-scratchpad.service
@@ -42,7 +53,7 @@ validate: check-go
 	./bin/$(VALIDATE_NAME)
 
 run: check-go
-	go run ./cmd/server -port 8083 -llama-url http://127.0.0.1:8082
+	go run ./cmd/server
 
 clean:
 	rm -rf bin/

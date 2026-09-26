@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -12,11 +13,13 @@ import (
 )
 
 var (
+	// ErrSnapshotNotFound indicates the requested snapshot does not exist.
 	ErrSnapshotNotFound = errors.New("snapshot not found")
-	ErrStepNotFound     = errors.New("reasoning step not found")
+	// ErrStepNotFound indicates the reasoning step index is out of bounds.
+	ErrStepNotFound = errors.New("reasoning step not found")
 )
 
-// Store provides an in-memory thread-safe working memory store with rollback capability.
+// Store provides a thread-safe, in-memory working memory store with rollback capability.
 type Store struct {
 	mu        sync.RWMutex
 	state     model.WorkingMemoryState
@@ -74,14 +77,14 @@ func (s *Store) IngestSensory(chunks []model.SensoryChunk) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	added := 0
-	existing := make(map[string]bool)
+	existing := make(map[string]bool, len(s.state.SensoryContext))
 	for _, c := range s.state.SensoryContext {
 		if c.ID != "" {
 			existing[c.ID] = true
 		}
 	}
 
+	added := 0
 	for _, c := range chunks {
 		if c.ID != "" && existing[c.ID] {
 			continue
@@ -102,12 +105,12 @@ func (s *Store) IngestLongTerm(facts []string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	added := 0
-	existing := make(map[string]bool)
+	existing := make(map[string]bool, len(s.state.LongTermContext))
 	for _, f := range s.state.LongTermContext {
 		existing[f] = true
 	}
 
+	added := 0
 	for _, f := range facts {
 		if f == "" || existing[f] {
 			continue
@@ -122,7 +125,7 @@ func (s *Store) IngestLongTerm(facts []string) int {
 }
 
 // AddStep appends a new deliberate reasoning step to the active trajectory.
-func (s *Store) AddStep(thought, action string, status string) int {
+func (s *Store) AddStep(thought, action string, status model.StepStatus) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -155,11 +158,11 @@ func (s *Store) RecordObservation(stepIdx int, observation string, success bool)
 
 	step := &s.state.Trajectory[stepIdx-1]
 	step.Observation = observation
+	step.Status = model.StepStatusError
 	if success {
 		step.Status = model.StepStatusSuccess
-	} else {
-		step.Status = model.StepStatusError
 	}
+
 	s.state.UpdatedAt = time.Now()
 	return nil
 }
@@ -177,14 +180,14 @@ func (s *Store) AddCandidateAction(action model.CandidateAction) {
 }
 
 // CreateSnapshot captures a snapshot of current working memory for rollback isolation.
-func (s *Store) CreateSnapshot(desc string) int {
+func (s *Store) CreateSnapshot(description string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	snapID := len(s.snapshots) + 1
 	snap := model.Snapshot{
 		SnapshotID:  snapID,
-		Description: desc,
+		Description: description,
 		State:       s.cloneState(s.state),
 		Timestamp:   time.Now(),
 	}
@@ -193,36 +196,34 @@ func (s *Store) CreateSnapshot(desc string) int {
 	return snapID
 }
 
-// Rollback restores working memory to the specified snapshot (or latest if id <= 0).
+// Rollback restores working memory to the specified snapshot (or latest if snapshotID <= 0).
 func (s *Store) Rollback(snapshotID int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.snapshots) == 0 {
-		return ErrSnapshotNotFound
+	target, err := s.findSnapshotLocked(snapshotID)
+	if err != nil {
+		return err
 	}
 
-	var target *model.Snapshot
-	if snapshotID <= 0 {
-		// Roll back to the most recent snapshot
-		target = &s.snapshots[len(s.snapshots)-1]
-	} else {
-		for i := range s.snapshots {
-			if s.snapshots[i].SnapshotID == snapshotID {
-				target = &s.snapshots[i]
-				break
-			}
-		}
-	}
-
-	if target == nil {
-		return ErrSnapshotNotFound
-	}
-
-	// Restore state from target snapshot
 	s.state = s.cloneState(target.State)
 	s.state.UpdatedAt = time.Now()
 	return nil
+}
+
+func (s *Store) findSnapshotLocked(snapshotID int) (*model.Snapshot, error) {
+	if len(s.snapshots) == 0 {
+		return nil, ErrSnapshotNotFound
+	}
+	if snapshotID <= 0 {
+		return &s.snapshots[len(s.snapshots)-1], nil
+	}
+	for i := range s.snapshots {
+		if s.snapshots[i].SnapshotID == snapshotID {
+			return &s.snapshots[i], nil
+		}
+	}
+	return nil, ErrSnapshotNotFound
 }
 
 // ListSnapshots returns summary list of current snapshots.
@@ -289,22 +290,9 @@ func (s *Store) SetTokenEstimate(count int) {
 
 func (s *Store) cloneState(src model.WorkingMemoryState) model.WorkingMemoryState {
 	dst := src
-
-	if src.SensoryContext != nil {
-		dst.SensoryContext = make([]model.SensoryChunk, len(src.SensoryContext))
-		copy(dst.SensoryContext, src.SensoryContext)
-	}
-	if src.LongTermContext != nil {
-		dst.LongTermContext = make([]string, len(src.LongTermContext))
-		copy(dst.LongTermContext, src.LongTermContext)
-	}
-	if src.Trajectory != nil {
-		dst.Trajectory = make([]model.ReasoningStep, len(src.Trajectory))
-		copy(dst.Trajectory, src.Trajectory)
-	}
-	if src.CandidateActions != nil {
-		dst.CandidateActions = make([]model.CandidateAction, len(src.CandidateActions))
-		copy(dst.CandidateActions, src.CandidateActions)
-	}
+	dst.SensoryContext = slices.Clone(src.SensoryContext)
+	dst.LongTermContext = slices.Clone(src.LongTermContext)
+	dst.Trajectory = slices.Clone(src.Trajectory)
+	dst.CandidateActions = slices.Clone(src.CandidateActions)
 	return dst
 }

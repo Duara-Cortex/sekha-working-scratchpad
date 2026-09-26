@@ -9,7 +9,9 @@ Type=simple
 User=admin
 Group=admin
 WorkingDirectory=/opt/sekha
-ExecStart=/usr/local/bin/sekha-working-scratchpad -port 8083 -llama-url http://127.0.0.1:8082 -context-limit 2048 -output-reserve 256
+EnvironmentFile=-/etc/default/sekha
+EnvironmentFile=-/opt/sekha/.env
+ExecStart=/usr/local/bin/sekha-working-scratchpad
 Restart=always
 RestartSec=3
 

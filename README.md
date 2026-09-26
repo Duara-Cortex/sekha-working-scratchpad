@@ -1,13 +1,14 @@
 # 🧠 Sekha Working Memory Deliberation Scratchpad
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Architecture](https://img.shields.io/badge/Node-Node_2_(16GB_RPi5)-orange.svg)]()
-[![Inference](https://img.shields.io/badge/Engine-llama.cpp_ARM_NEON-green.svg)]()
-[![Port](https://img.shields.io/badge/Port-8083-purple.svg)]()
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8.svg)]()
+[![Configuration](https://img.shields.io/badge/Config-.env_%2F_system-green.svg)]()
 
-The **Working Memory Deliberation Scratchpad** is the active cognitive scratchpad service running on **Node 2** (`sekha-node2` &bull; `192.168.8.175` &bull; 16GB RAM) of the **Sekha Tri-Node Edge Cognitive Cluster**.
+The **Working Memory Deliberation Scratchpad** is the active cognitive deliberation service for the **Sekha Tri-Node Edge Cognitive Cluster**.
 
-It emulates human working memory (inspired by Baddeley's model of the central executive and episodic buffer) by maintaining intermediate hypotheses, multi-step chain-of-thought trajectories, and uncommitted candidate actions in volatile local RAM **without prematurely polluting permanent storage**.
+It emulates human working memory by maintaining intermediate hypotheses, multi-step chain-of-thought trajectories, and uncommitted candidate actions in volatile local RAM **without prematurely polluting permanent storage**.
+
+Deliberation prompt construction is **stateless and strictly isolated** to incoming request payloads, preventing in-memory state accumulation, token inflation, and context leakage across consecutive cognitive cycles. All host, port, model, and network parameters are fully decoupled and configurable via environment files.
 
 ---
 
@@ -18,9 +19,9 @@ graph TD
     Harness[Agent Orchestration Harness / Central Skill]
     
     subgraph Cluster["Sekha Tri-Node Cluster"]
-        Node3["Node 3: Sensory Buffer (:8081)<br>4GB RAM • 192.168.8.183"]
-        Node2["Node 2: Working Memory (:8083)<br>16GB RAM • 192.168.8.175"]
-        Node1["Node 1: Long-Term Memory (:8084)<br>8GB RAM • 192.168.8.213"]
+        Node3["Node 3: Sensory Buffer (:<port>)<br>Ring Buffer Stimuli"]
+        Node2["Node 2: Working Memory (:<port> )<br>Deliberation & Hypotheses"]
+        Node1["Node 1: Long-Term Memory (:<port>)<br>Associative Knowledge Graph"]
     end
     
     Harness -->|"sensory_filter_stream"| Node3
@@ -32,44 +33,90 @@ graph TD
 
 ---
 
-## ✨ Key Features
+## ⚙️ Configuration & Environment
 
-1. **Working Memory State Schema**:
-   - **Active Goal**: Primary objective currently being evaluated.
-   - **Sensory Chunks**: High-salience text events ingested from Node 3's ring buffer (`:8081`).
-   - **Long-Term Context**: Associative knowledge recalled from Node 1 (`:8084`).
-   - **Reasoning Trajectory**: Step-by-step internal monologue (`Thought`) and proposed actions (`Action`).
-   - **Candidate Actions**: Uncommitted decisions held until deliberation concludes.
+The service requires explicit configuration without hardcoded fallback values. Configuration is loaded from:
+1. **CLI Flags** (e.g. `-node-port`, `-model`, `-inference-url`, `-env`)
+2. **Environment Variables** (`os.Environ`)
+3. **Local `.env` file** (or path provided via `-env`)
+4. **System-wide configuration** at `/etc/default/sekha` (auto-discovered if `.env` is absent)
 
-2. **In-Memory Store & Snapshot Isolation**:
-   - Operates entirely within Node 2's local RAM envelope (~14 GiB free headroom).
-   - Fast state snapshots before every deliberation step.
-   - **Instant Rollback**: If an intermediate hypothesis or tool proposal fails or is deemed unsafe, the scratchpad rolls back to an earlier snapshot, completely isolating errors and preventing permanent state pollution.
+If any required configuration key is missing, the service fails fast with an explicit error.
 
-3. **Dynamic Context Budgeter**:
-   - Manages strict token allocation (e.g. 2,048 tokens total context with 256 tokens output reserve).
-   - Prevents prompt truncation while ensuring system instructions and goals are preserved:
-     - System prompt & schema: ~320 tokens (fixed, immutable)
-     - Active goal: ~150 tokens
-     - Sensory context: ~400 tokens (highest salience first)
-     - Long-term context: ~350 tokens
-     - Trajectory history: ~572 tokens (rolling window of recent steps)
-     - Generation reserve: 256 tokens
+### Required Environment Keys
 
-4. **Native Local Inference Integration**:
-   - Communicates over localhost with Node 2's natively compiled `llama-server` on port `8082` (`Qwen2.5-1.5B-Instruct` on ARM NEON).
-   - Parses structured thoughts, discrete actions, and completion flags.
+| Variable | Description | Example |
+| :--- | :--- | :--- |
+| `NODE_PORT` | HTTP port for the deliberation scratchpad service (alias: `PORT`) | `8083` |
+| `NODE_NAME` | Node identifier for cluster topology reporting | `sekha-node2` |
+| `INFERENCE_URL` | Base URL of OpenAI-compatible inference engine (alias: `LLAMA_URL`) | `http://127.0.0.1:8082` |
+| `INFERENCE_MODEL` | Model identifier (alias: `LLAMA_MODEL`) | `qwen2.5-1.5b-instruct` |
+| `INFERENCE_TIMEOUT_SEC`| Inference HTTP request timeout in seconds | `60` |
+| `CONTEXT_LIMIT` | Maximum token envelope for cognitive context | `2048` |
+| `OUTPUT_RESERVE` | Reserved tokens for next-step generation | `256` |
+| `SYSTEM_PROMPT` | *(Optional)* System prompt override for deliberation reasoning | *(Custom string)* |
+
+### Example `.env`
+
+Copy `.env.example` to `.env` to configure your environment:
+
+```bash
+cp .env.example .env
+```
+
+```env
+# Server Configuration (Required)
+NODE_PORT=<port>
+NODE_NAME=<node name>
+
+# Inference Engine Configuration (Required)
+# Works with llama-server, vLLM, Ollama, or any OpenAI-compatible endpoint
+INFERENCE_URL=http://127.0.0.1:<port>
+INFERENCE_MODEL=<model> e.g qwen2.5-1.5b-instruct
+INFERENCE_TIMEOUT_SEC=60
+
+# Token Envelope & Memory Budget (Required)
+CONTEXT_LIMIT=2048
+OUTPUT_RESERVE=256
+
+# Optional System Prompt Override
+SYSTEM_PROMPT=
+```
 
 ---
 
-## 📡 REST API Reference (Port `8083`)
+## ✨ Key Features
+
+1. **Stateless Deliberation Isolation**:
+   - Each deliberation cycle strictly constructs prompts from the incoming request payload (`objective`, `sensory_chunks`, `long_term_context`, `observation`).
+   - Zero state leakage between consecutive tasks or distinct deliberation cycles.
+
+2. **In-Memory Store & Snapshot Isolation**:
+   - Operates in volatile RAM with zero disk overhead.
+   - **Snapshot Checkpoints**: Capture working memory state before speculative actions.
+   - **Instant Rollback**: If an intermediate hypothesis or tool proposal fails or is deemed unsafe, the scratchpad rolls back to an earlier snapshot, completely isolating errors.
+
+3. **Dynamic Context Budgeter**:
+   - Strictly enforces token boundaries (e.g., 2,048 tokens context with 256 tokens output reserve).
+   - Allocates partitioned token budgets across Goal, Sensory, Long-Term, and Observation sections.
+   - UTF-8 rune-safe truncation prevents splitting multi-byte characters.
+
+4. **Universal Inference Integration**:
+   - Communicates with any OpenAI-compatible completions API (`/v1/chat/completions`).
+   - Parses structured thoughts, discrete actions, and completion flags.
+   - Supports per-request model overrides.
+
+---
+
+## 📡 REST API Reference
 
 ### 1. `POST /api/v1/working/deliberate`
-Ingests an objective, sensory stimuli, or observation from an action, updates the scratchpad, calls the local SLM, and returns the next-step plan.
+Constructs a budget-constrained prompt from incoming stimuli and returns structured thoughts and discrete next actions.
 
 **Request:**
 ```json
 {
+  "model": "qwen2.5-1.5b-instruct",
   "objective": "Diagnose inter-node packet loss between Node 3 and Node 2",
   "sensory_chunks": [
     {
@@ -92,77 +139,106 @@ Ingests an objective, sensory stimuli, or observation from an action, updates th
 ```json
 {
   "status": "ok",
-  "step_index": 2,
+  "step_index": 1,
   "thought": "Ping latency is optimal at 0.28ms, indicating physical link carrier is healthy. The reported drops were likely transient ICMP rate limits.",
   "proposed_action": "Query Node 3 sensory buffer stats endpoint for dropped count",
   "is_complete": false,
+  "candidate_actions": [],
   "prompt_tokens": 142,
   "completion_tokens": 36,
   "total_tokens": 178,
   "prompt_eval_rate_tps": 32.15,
   "generation_rate_tps": 12.44,
   "active_goal": "Diagnose inter-node packet loss between Node 3 and Node 2",
-  "trajectory_length": 2,
-  "timestamp": "2026-09-13T18:30:00Z"
+  "trajectory_length": 1,
+  "timestamp": "2026-09-26T22:30:00Z"
 }
 ```
 
 ---
 
-### 2. `GET /api/v1/working/scratchpad`
-Returns the full active working memory state for cluster harness inspection and debugging.
+### 2. `POST /api/v1/working/snapshot`
+Captures a snapshot of current working memory state for rollback isolation.
+
+**Request:**
+```json
+{
+  "description": "Pre-hypothesis checkpoint"
+}
+```
 
 **Response:**
 ```json
 {
-  "session_id": "wm-a4f7819c4d2e",
-  "active_goal": "Diagnose inter-node packet loss between Node 3 and Node 2",
-  "sensory_context": [...],
-  "long_term_context": [...],
-  "trajectory": [
-    {
-      "step_index": 1,
-      "thought": "Initial assessment of network state",
-      "action": "ping Node 3",
-      "observation": "0.28ms RTT",
-      "status": "success",
-      "timestamp": "2026-09-13T18:29:45Z"
-    }
-  ],
-  "candidate_actions": [],
-  "status": "deliberating",
-  "token_estimate": 178,
-  "created_at": "2026-09-13T18:29:30Z",
-  "updated_at": "2026-09-13T18:30:00Z"
+  "status": "ok",
+  "snapshot_id": 1,
+  "description": "Pre-hypothesis checkpoint"
 }
 ```
 
 ---
 
 ### 3. `POST /api/v1/working/rollback`
-Restores working memory to a previous snapshot, discarding faulty or unsafe intermediate reasoning steps without polluting state.
+Restores working memory to a previous snapshot, discarding faulty or unsafe intermediate reasoning steps.
 
 **Query Parameters:**
-* `snapshot_id`: (Optional) ID of snapshot to restore. If omitted, reverts to most recent snapshot.
+* `snapshot_id`: *(Optional)* ID of snapshot to restore. If omitted, reverts to the most recent snapshot.
 
 **Response:**
 ```json
 {
   "status": "rolled_back",
   "message": "working memory restored to snapshot",
-  "state": { ... }
+  "state": {
+    "session_id": "wm-a4f7819c4d2e",
+    "active_goal": "",
+    "sensory_context": [],
+    "long_term_context": [],
+    "trajectory": [],
+    "candidate_actions": [],
+    "status": "idle"
+  }
 }
 ```
 
 ---
 
-### 4. `POST /api/v1/working/clear`
-Flushes the active scratchpad and all snapshots upon task completion.
+### 4. `GET /api/v1/working/stats`
+Returns cluster telemetry, active session counts, and memory envelope statistics.
+
+**Response:**
+```json
+{
+  "active_sessions": 1,
+  "active_goal": "",
+  "sensory_items_count": 0,
+  "long_term_facts_count": 0,
+  "trajectory_steps": 0,
+  "candidate_actions": 0,
+  "snapshot_count": 1,
+  "est_context_tokens": 0,
+  "uptime_seconds": 120,
+  "last_updated": "2026-09-26T22:30:00Z"
+}
+```
 
 ---
 
 ### 5. `GET /api/v1/working/health` (or `/healthz`)
-Reports daemon status and validates local downstream reachability to `llama-server` on port `8082`.
+Reports daemon status, node identity, port, and validates downstream reachability to the inference engine.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "service": "sekha-working-scratchpad",
+  "node": "sekha-node2",
+  "port": 8083,
+  "uptime_seconds": 120,
+  "llama_inference": "reachable",
+  "timestamp": "2026-09-26T22:30:00Z"
+}
+```
 
 ---
 
@@ -172,34 +248,68 @@ Reports daemon status and validates local downstream reachability to `llama-serv
 ```bash
 make build
 ```
+Binaries are produced in `bin/`:
+- `bin/sekha-working-scratchpad` (Daemon)
+- `bin/sekha-scratchpad-validate` (Validation Suite)
 
-### Cross-Compile for ARM64 (Raspberry Pi 5)
+### Cross-Compile for ARM64
 ```bash
 make build-arm64
 ```
 
-### Run Synthetic Validation Suite
+### Run Locally
+Runs the daemon using settings loaded from `.env`:
+```bash
+make run
+```
+Or with custom flags/env overrides:
+```bash
+NODE_PORT=9090 INFERENCE_URL=http://localhost:8000 INFERENCE_MODEL=meta-llama/Llama-3.2-3B-Instruct go run ./cmd/server
+```
+
+### Run Validation Suite
+Runs the synthetic multi-step verification test against a running service or spins up a local engine on the configured `NODE_PORT`:
 ```bash
 make validate
 ```
+Or test a custom port or remote target directly:
+```bash
+NODE_PORT=9090 make validate
+# or
+./bin/sekha-scratchpad-validate -url http://<node url>:<port>
+```
 
-### Deployment on Node 2
-1. Pull latest code to Node 2:
-   ```bash
-   git pull origin main
-   ```
-2. Build and install systemd unit:
-   ```bash
-   make install
-   ```
-3. Check status via the native Node 2 management CLI:
-   ```bash
-   sekha status
-   ```
-   Or query the scratchpad service directly:
-   ```bash
-   curl http://localhost:8083/api/v1/working/health
-   ```
+---
+
+## 🚀 System Deployment (`make install`)
+
+The `install` target copies the compiled binary to `/usr/local/bin`, installs the active environment configuration to `/etc/default/sekha`, and registers the systemd unit:
+
+```bash
+# Install using the local .env configuration
+sudo make install
+
+# Or specify a custom environment file
+ENV_FILE=/path/to/custom.env sudo make install
+```
+
+When installed:
+- Environment configuration is stored at `/etc/default/sekha`.
+- The binary can be executed from **any directory on the system** without missing its configuration:
+  ```bash
+  sekha-working-scratchpad
+  ```
+- The systemd unit (`sekha-working-scratchpad.service`) automatically loads `/etc/default/sekha` on boot.
+
+Check daemon status:
+```bash
+sudo systemctl status sekha-working-scratchpad.service
+```
+
+Query the health endpoint:
+```bash
+curl http://localhost:<port>/api/v1/working/health
+```
 
 ---
 
