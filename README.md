@@ -51,7 +51,7 @@ If any required configuration key is missing, the service fails fast with an exp
 | `NODE_NAME` | Node identifier for cluster topology reporting | `sekha-node2` |
 | `INFERENCE_URL` | Base URL of OpenAI-compatible inference engine (alias: `LLAMA_URL`) | `http://127.0.0.1:8082` |
 | `INFERENCE_MODEL` | Model identifier (alias: `LLAMA_MODEL`) | `qwen2.5-1.5b-instruct` |
-| `INFERENCE_TIMEOUT_SEC`| Timeout for one deliberation (inference call) in seconds; a full 4,096 window on a Pi needs ~150 | `60` |
+| `INFERENCE_TIMEOUT_SEC`| Timeout for one deliberation (inference call) in seconds; a full 4,096 window | `60` |
 | `CONTEXT_LIMIT` | Maximum token envelope for cognitive context | `2048` |
 | `OUTPUT_RESERVE` | Reserved tokens for next-step generation | `256` |
 | `SYSTEM_PROMPT` | *(Optional)* System prompt override for deliberation reasoning | *(Custom string)* |
