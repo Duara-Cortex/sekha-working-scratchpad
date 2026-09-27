@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/inference"
@@ -330,5 +331,29 @@ func TestServer_DeliberatePrepackedKeepsEverything(t *testing.T) {
 	}
 	if u.EstimatedPromptTokens < 2000 {
 		t.Fatalf("expected a large prompt, estimate %d", u.EstimatedPromptTokens)
+	}
+}
+
+type slowEngine struct{ mockEngine }
+
+func (m *slowEngine) Infer(ctx context.Context, _ inference.Request) (*inference.DeliberationOutput, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestServer_DeliberateTimeoutIsConfigurable(t *testing.T) {
+	server := NewServer(scratchpad.NewStore(), nil, &slowEngine{})
+	server.SetDeliberateTimeout(50 * time.Millisecond)
+
+	start := time.Now()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", strings.NewReader(`{"objective":"x"}`))
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on timeout, got %d", w.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("configured timeout ignored: took %s", elapsed)
 	}
 }

@@ -28,6 +28,8 @@ type Server struct {
 	startTime time.Time
 	nodeName  string
 	port      int
+	// deliberateTimeout bounds one inference call; set from INFERENCE_TIMEOUT_SEC.
+	deliberateTimeout time.Duration
 }
 
 // NewServer initializes the deliberation scratchpad server.
@@ -41,6 +43,8 @@ func NewServer(store *scratchpad.Store, bud *budgeter.Budgeter, engine inference
 		Engine:    engine,
 		mux:       http.NewServeMux(),
 		startTime: time.Now(),
+
+		deliberateTimeout: defaultDeliberateTimeout,
 	}
 	s.registerRoutes()
 	return s
@@ -50,6 +54,13 @@ func NewServer(store *scratchpad.Store, bud *budgeter.Budgeter, engine inference
 func (s *Server) SetNodeInfo(nodeName string, port int) {
 	s.nodeName = nodeName
 	s.port = port
+}
+
+// SetDeliberateTimeout sets how long one deliberation may wait for the inference engine.
+func (s *Server) SetDeliberateTimeout(d time.Duration) {
+	if d > 0 {
+		s.deliberateTimeout = d
+	}
 }
 
 func (s *Server) registerRoutes() {
@@ -74,7 +85,7 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 
 	prompt := s.Budgeter.BuildPrompt(req)
 
-	ctx, cancel := context.WithTimeout(r.Context(), defaultDeliberateTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), s.deliberateTimeout)
 	defer cancel()
 
 	output, err := s.Engine.Infer(ctx, inference.Request{
