@@ -114,6 +114,7 @@ func main() {
 
 	server := api.NewServer(store, bud, client)
 	server.SetNodeInfo(cfg.NodeName, cfg.Port)
+	server.SetDeliberateTimeout(cfg.InferenceTimeout())
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
