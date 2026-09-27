@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +110,70 @@ OUTPUT_RESERVE=256
 	_, err := Load(envPath)
 	if err == nil {
 		t.Fatalf("expected error due to invalid port, got nil")
+	}
+}
+
+const requiredKeys = `NODE_PORT=9000
+NODE_NAME=node-test
+INFERENCE_URL=http://localhost:8080
+INFERENCE_MODEL=test-model
+INFERENCE_TIMEOUT_SEC=30
+CONTEXT_LIMIT=4096
+OUTPUT_RESERVE=512
+`
+
+func writeEnv(t *testing.T, content string) string {
+	t.Helper()
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write test env file: %v", err)
+	}
+	return envPath
+}
+
+func TestLoad_BudgetDefaults(t *testing.T) {
+	cfg, err := Load(writeEnv(t, requiredKeys))
+	if err != nil {
+		t.Fatalf("expected successful load without budget keys, got error: %v", err)
+	}
+	if cfg.GoalBudget != 150 || cfg.SensoryBudget != 0 || cfg.LongTermBudget != 350 ||
+		cfg.ObservationBudget != 572 || cfg.SafetyMargin != 32 {
+		t.Fatalf("unexpected budget defaults: %+v", cfg)
+	}
+}
+
+func TestLoad_BudgetOverrides(t *testing.T) {
+	content := requiredKeys + `GOAL_BUDGET=100
+SENSORY_BUDGET=1500
+LONG_TERM_BUDGET=500
+OBSERVATION_BUDGET=200
+PROMPT_SAFETY_MARGIN=64
+`
+	envPath := writeEnv(t, content)
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatalf("expected successful load, got error: %v", err)
+	}
+	if cfg.GoalBudget != 100 || cfg.SensoryBudget != 1500 || cfg.LongTermBudget != 500 ||
+		cfg.ObservationBudget != 200 || cfg.SafetyMargin != 64 {
+		t.Fatalf("budget overrides not applied: %+v", cfg)
+	}
+
+	// Process environment wins over the file, as for the required keys.
+	t.Setenv("SENSORY_BUDGET", "900")
+	cfg, err = Load(envPath)
+	if err != nil {
+		t.Fatalf("expected successful load, got error: %v", err)
+	}
+	if cfg.SensoryBudget != 900 {
+		t.Fatalf("expected SENSORY_BUDGET from environment 900, got %d", cfg.SensoryBudget)
+	}
+}
+
+func TestLoad_InvalidBudget(t *testing.T) {
+	for _, bad := range []string{"LONG_TERM_BUDGET=-1\n", "GOAL_BUDGET=lots\n"} {
+		if _, err := Load(writeEnv(t, requiredKeys+bad)); err == nil {
+			t.Fatalf("expected error for %q, got nil", strings.TrimSpace(bad))
+		}
 	}
 }

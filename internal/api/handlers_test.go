@@ -263,3 +263,72 @@ func TestServer_RollbackEndpoint(t *testing.T) {
 		t.Fatalf("expected step 1 thought, got: %s", state.Trajectory[0].Thought)
 	}
 }
+
+func postDeliberate(t *testing.T, server *Server, body string) model.DeliberateResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/deliberate", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp model.DeliberateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	return resp
+}
+
+func TestServer_DeliberateWithoutNewFieldsReportsUsage(t *testing.T) {
+	mock := &mockEngine{output: &inference.DeliberationOutput{Thought: "t", Action: "a", PromptTokens: 249}}
+	server := NewServer(scratchpad.NewStore(), budgeter.New(budgeter.DefaultConfig()), mock)
+
+	// A pre-contract request: no prepacked, no prompt_budget_tokens.
+	resp := postDeliberate(t, server, `{
+		"objective": "Isolate network jitter",
+		"sensory_chunks": [{"id": "c1", "text": "packet delay > 5ms", "salience": 0.8}],
+		"long_term_context": ["Switch port 2 links to Node 3"]
+	}`)
+
+	u := resp.ContextUsage
+	if u.SensoryReceived != 1 || u.SensoryKept != 1 || u.SensoryDropped != 0 || u.SensoryTruncated != 0 ||
+		u.FactsReceived != 1 || u.FactsKept != 1 {
+		t.Fatalf("unexpected context usage: %+v", u)
+	}
+	if u.ActualPromptTokens != 249 || resp.PromptTokens != 249 {
+		t.Fatalf("actual_prompt_tokens must come from the model server: %+v", u)
+	}
+	if u.EstimatedPromptTokens <= 0 || u.PromptWindowTokens != budgeter.DefaultContextLimit-budgeter.DefaultOutputReserve {
+		t.Fatalf("unexpected token fields: %+v", u)
+	}
+}
+
+func TestServer_DeliberatePrepackedKeepsEverything(t *testing.T) {
+	mock := &mockEngine{output: &inference.DeliberationOutput{Thought: "t", Action: "a", PromptTokens: 3100}}
+	cfg := budgeter.DefaultConfig()
+	cfg.MaxContextTokens = 4096
+	cfg.OutputReserve = 512
+	server := NewServer(scratchpad.NewStore(), budgeter.New(cfg), mock)
+
+	chunks := make([]model.SensoryChunk, 40)
+	for i := range chunks {
+		chunks[i] = model.SensoryChunk{ID: "c", Text: strings.Repeat("transcript words ", 16), Salience: float64(i%5) / 10}
+	}
+	body, err := json.Marshal(map[string]any{
+		"objective":            "Summarize",
+		"sensory_chunks":       chunks,
+		"prepacked":            true,
+		"prompt_budget_tokens": 3456,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	u := postDeliberate(t, server, string(body)).ContextUsage
+	if u.SensoryKept != 40 || u.SensoryDropped != 0 || u.ActualPromptTokens != 3100 || u.PromptWindowTokens != 3584 {
+		t.Fatalf("unexpected context usage: %+v", u)
+	}
+	if u.EstimatedPromptTokens < 2000 {
+		t.Fatalf("expected a large prompt, estimate %d", u.EstimatedPromptTokens)
+	}
+}

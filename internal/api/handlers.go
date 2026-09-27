@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -88,6 +89,14 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	usage := prompt.Usage
+	usage.ActualPromptTokens = output.PromptTokens
+	if usage.SensoryDropped > 0 || usage.FactsKept < usage.FactsReceived {
+		log.Printf("deliberate: trimmed context (prepacked=%t, caller budget=%d): sensory kept %d/%d (truncated %d), facts kept %d/%d, est %d, actual %d, window %d",
+			req.Prepacked, req.PromptBudgetTokens, usage.SensoryKept, usage.SensoryReceived, usage.SensoryTruncated,
+			usage.FactsKept, usage.FactsReceived, usage.EstimatedPromptTokens, usage.ActualPromptTokens, usage.PromptWindowTokens)
+	}
+
 	resp := model.DeliberateResponse{
 		Status:           "ok",
 		StepIndex:        1,
@@ -102,6 +111,7 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 		GenerationRate:   output.PredictedTPS,
 		ActiveGoal:       req.Objective,
 		TrajectoryLength: 1,
+		ContextUsage:     usage,
 		Timestamp:        time.Now(),
 	}
 

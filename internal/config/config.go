@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
 )
 
 // Config represents application runtime settings loaded strictly from .env and environment variables.
@@ -20,6 +22,13 @@ type Config struct {
 	ContextLimit        int
 	OutputReserve       int
 	SystemPrompt        string
+
+	// Optional prompt budgets (tokens). Each part is a cap; what a part leaves unused goes to sensory.
+	GoalBudget        int // GOAL_BUDGET
+	SensoryBudget     int // SENSORY_BUDGET; 0 = no cap, sensory gets the rest of the window
+	LongTermBudget    int // LONG_TERM_BUDGET
+	ObservationBudget int // OBSERVATION_BUDGET
+	SafetyMargin      int // PROMPT_SAFETY_MARGIN
 }
 
 // InferenceTimeout returns the duration for inference requests.
@@ -130,6 +139,23 @@ func Load(envPaths ...string) (*Config, error) {
 
 	systemPrompt, _ := lookupKey("SYSTEM_PROMPT", envMap)
 
+	var goalBudget, sensoryBudget, longTermBudget, observationBudget, safetyMargin int
+	for _, opt := range []struct {
+		key    string
+		target *int
+		def    int
+	}{
+		{"GOAL_BUDGET", &goalBudget, budgeter.DefaultGoalBudget},
+		{"SENSORY_BUDGET", &sensoryBudget, budgeter.DefaultSensoryBudget},
+		{"LONG_TERM_BUDGET", &longTermBudget, budgeter.DefaultLongTermBudget},
+		{"OBSERVATION_BUDGET", &observationBudget, budgeter.DefaultTrajectoryBudget},
+		{"PROMPT_SAFETY_MARGIN", &safetyMargin, budgeter.DefaultSafetyMargin},
+	} {
+		if *opt.target, err = optionalNonNegativeInt(opt.key, opt.def, envMap); err != nil {
+			return nil, err
+		}
+	}
+
 	return &Config{
 		Port:                port,
 		NodeName:            nodeName,
@@ -139,7 +165,25 @@ func Load(envPaths ...string) (*Config, error) {
 		ContextLimit:        contextLimit,
 		OutputReserve:       outputReserve,
 		SystemPrompt:        systemPrompt,
+		GoalBudget:          goalBudget,
+		SensoryBudget:       sensoryBudget,
+		LongTermBudget:      longTermBudget,
+		ObservationBudget:   observationBudget,
+		SafetyMargin:        safetyMargin,
 	}, nil
+}
+
+// optionalNonNegativeInt reads an optional integer key, returning def when it is unset or empty.
+func optionalNonNegativeInt(key string, def int, envMap map[string]string) (int, error) {
+	raw, ok := lookupKey(key, envMap)
+	if !ok || raw == "" {
+		return def, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("invalid %s: %q must be a non-negative integer", key, raw)
+	}
+	return v, nil
 }
 
 func parseEnvFile(path string, target map[string]string) error {

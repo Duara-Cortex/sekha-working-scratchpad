@@ -83,6 +83,16 @@ func main() {
 	log.Printf("Inference Timeout:   %ds", cfg.InferenceTimeoutSec)
 	log.Printf("Context Limit:       %d tokens", cfg.ContextLimit)
 	log.Printf("Output Reserve:      %d tokens", cfg.OutputReserve)
+	log.Printf("Prompt Window:       %d tokens", cfg.ContextLimit-cfg.OutputReserve)
+	log.Printf("Safety Margin:       %d tokens", cfg.SafetyMargin)
+	log.Printf("Goal Budget:         %d tokens (cap)", cfg.GoalBudget)
+	log.Printf("Observation Budget:  %d tokens (cap)", cfg.ObservationBudget)
+	log.Printf("Long-Term Budget:    %d tokens (cap)", cfg.LongTermBudget)
+	if cfg.SensoryBudget > 0 {
+		log.Printf("Sensory Budget:      %d tokens (cap)", cfg.SensoryBudget)
+	} else {
+		log.Printf("Sensory Budget:      rest of window (no cap)")
+	}
 
 	store := scratchpad.NewStore()
 
@@ -90,7 +100,11 @@ func main() {
 	bCfg.MaxContextTokens = cfg.ContextLimit
 	bCfg.OutputReserve = cfg.OutputReserve
 	bCfg.SystemPrompt = cfg.SystemPrompt
-	bCfg.TrajectoryBudget = cfg.ContextLimit - cfg.OutputReserve - bCfg.SystemBudget - bCfg.GoalBudget - bCfg.SensoryBudget - bCfg.LongTermBudget
+	bCfg.GoalBudget = cfg.GoalBudget
+	bCfg.SensoryBudget = cfg.SensoryBudget
+	bCfg.LongTermBudget = cfg.LongTermBudget
+	bCfg.TrajectoryBudget = cfg.ObservationBudget
+	bCfg.SafetyMargin = cfg.SafetyMargin
 	bud := budgeter.New(bCfg)
 
 	client, err := inference.NewClient(cfg.InferenceURL, cfg.InferenceModel, cfg.InferenceTimeout())
