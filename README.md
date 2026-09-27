@@ -56,6 +56,19 @@ If any required configuration key is missing, the service fails fast with an exp
 | `OUTPUT_RESERVE` | Reserved tokens for next-step generation | `256` |
 | `SYSTEM_PROMPT` | *(Optional)* System prompt override for deliberation reasoning | *(Custom string)* |
 
+### Optional Prompt Budget Keys
+
+Each part is a cap, not a reservation: whatever a part leaves unused goes to the sensory chunks.
+The prompt window is `CONTEXT_LIMIT - OUTPUT_RESERVE`; packing targets that minus `PROMPT_SAFETY_MARGIN`.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `GOAL_BUDGET` | Cap on the objective text | `150` |
+| `OBSERVATION_BUDGET` | Cap on the current observation | `572` |
+| `LONG_TERM_BUDGET` | Cap on long-term facts (ignored for `prepacked` requests) | `350` |
+| `SENSORY_BUDGET` | Cap on sensory chunks; `0` = rest of the window (ignored for `prepacked` requests) | `0` |
+| `PROMPT_SAFETY_MARGIN` | Headroom for chat-template tokens and token-estimate error | `32` |
+
 ### Example `.env`
 
 Copy `.env.example` to `.env` to configure your environment:
@@ -98,7 +111,9 @@ SYSTEM_PROMPT=
 
 3. **Dynamic Context Budgeter**:
    - Strictly enforces token boundaries (e.g., 2,048 tokens context with 256 tokens output reserve).
-   - Allocates partitioned token budgets across Goal, Sensory, Long-Term, and Observation sections.
+   - Caps Goal, Observation and Long-Term sections; Sensory gets the rest of the window.
+   - When chunks must be dropped, the lowest-salience ones go first (at most one is truncated) and the kept chunks stay in their original order. Facts are dropped from the lowest-ranked end.
+   - `prepacked: true` requests keep every chunk and fact if the rendered prompt fits the window.
    - UTF-8 rune-safe truncation prevents splitting multi-byte characters.
 
 4. **Universal Inference Integration**:
@@ -131,7 +146,9 @@ Constructs a budget-constrained prompt from incoming stimuli and returns structu
   ],
   "observation": "Previous ping to 192.168.8.183 succeeded with 0.28ms latency",
   "max_tokens": 256,
-  "temperature": 0.2
+  "temperature": 0.2,
+  "prepacked": false,
+  "prompt_budget_tokens": 0
 }
 ```
 
@@ -151,9 +168,22 @@ Constructs a budget-constrained prompt from incoming stimuli and returns structu
   "generation_rate_tps": 12.44,
   "active_goal": "Diagnose inter-node packet loss between Node 3 and Node 2",
   "trajectory_length": 1,
+  "context_usage": {
+    "sensory_received": 1,
+    "sensory_kept": 1,
+    "sensory_dropped": 0,
+    "sensory_truncated": 0,
+    "facts_received": 1,
+    "facts_kept": 1,
+    "estimated_prompt_tokens": 318,
+    "actual_prompt_tokens": 142,
+    "prompt_window_tokens": 1792
+  },
   "timestamp": "2026-09-26T22:30:00Z"
 }
 ```
+
+`prepacked` (optional) says the caller already packed the chunks and facts to fit; `prompt_budget_tokens` (optional) is the budget it packed to. In `context_usage`, a truncated chunk counts as kept (`sensory_kept + sensory_dropped == sensory_received`), `estimated_prompt_tokens` is Node 2's estimate and `actual_prompt_tokens` is the inference server's count.
 
 ---
 

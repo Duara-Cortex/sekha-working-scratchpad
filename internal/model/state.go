@@ -87,6 +87,25 @@ type DeliberateRequest struct {
 	Observation     string         `json:"observation,omitempty"`
 	MaxTokens       int            `json:"max_tokens,omitempty"`
 	Temperature     float64        `json:"temperature,omitempty"`
+	// Prepacked marks that the caller already packed chunks and facts to fit; Node 2 keeps
+	// everything it was sent unless the rendered prompt does not fit the window.
+	Prepacked bool `json:"prepacked,omitempty"`
+	// PromptBudgetTokens is the prompt budget the caller packed to (informational).
+	PromptBudgetTokens int `json:"prompt_budget_tokens,omitempty"`
+}
+
+// ContextUsage reports how much of the request Node 2 actually placed in the prompt.
+// A truncated chunk counts as kept, so SensoryKept + SensoryDropped == SensoryReceived.
+type ContextUsage struct {
+	SensoryReceived       int `json:"sensory_received"`
+	SensoryKept           int `json:"sensory_kept"`
+	SensoryDropped        int `json:"sensory_dropped"`
+	SensoryTruncated      int `json:"sensory_truncated"`
+	FactsReceived         int `json:"facts_received"`
+	FactsKept             int `json:"facts_kept"`
+	EstimatedPromptTokens int `json:"estimated_prompt_tokens"`
+	ActualPromptTokens    int `json:"actual_prompt_tokens"`
+	PromptWindowTokens    int `json:"prompt_window_tokens"`
 }
 
 // DeliberateResponse is returned upon step completion.
@@ -104,6 +123,7 @@ type DeliberateResponse struct {
 	GenerationRate   float64           `json:"generation_rate_tps,omitempty"`
 	ActiveGoal       string            `json:"active_goal"`
 	TrajectoryLength int               `json:"trajectory_length"`
+	ContextUsage     ContextUsage      `json:"context_usage"`
 	Timestamp        time.Time         `json:"timestamp"`
 }
 
