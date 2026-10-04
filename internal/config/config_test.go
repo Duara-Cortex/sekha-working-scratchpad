@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -174,6 +175,74 @@ func TestLoad_InvalidBudget(t *testing.T) {
 	for _, bad := range []string{"LONG_TERM_BUDGET=-1\n", "GOAL_BUDGET=lots\n"} {
 		if _, err := Load(writeEnv(t, requiredKeys+bad)); err == nil {
 			t.Fatalf("expected error for %q, got nil", strings.TrimSpace(bad))
+		}
+	}
+}
+
+func TestLoad_WorkingMemoryDefaults(t *testing.T) {
+	cfg, err := Load(writeEnv(t, requiredKeys))
+	if err != nil {
+		t.Fatalf("expected successful load without WM keys, got error: %v", err)
+	}
+	if cfg.CallBudget != 1024 || cfg.WaitLimitSec != 600 || cfg.IdleTimeoutSec != 60 || cfg.Workers != 1 ||
+		cfg.RelatedItems != 5 || cfg.MaxItems != 50000 || cfg.ReinforceStep != 0.1 || cfg.CommitTimeoutSec != 30 ||
+		cfg.CommitJournal != "" {
+		t.Fatalf("unexpected working memory defaults: %+v", cfg)
+	}
+}
+
+func TestLoad_WorkingMemoryOverrides(t *testing.T) {
+	content := requiredKeys + `WM_MAX_ITEMS=1000
+WM_COMMIT_JOURNAL=/var/lib/sekha/commits.jsonl
+WM_CALL_BUDGET=800
+WM_WAIT_LIMIT_SEC=0
+WM_IDLE_TIMEOUT_SEC=5
+WM_WORKERS=2
+WM_REINFORCE_STEP=0.25
+`
+	cfg, err := Load(writeEnv(t, content))
+	if err != nil {
+		t.Fatalf("expected successful load, got error: %v", err)
+	}
+	if cfg.MaxItems != 1000 || cfg.CallBudget != 800 || cfg.WaitLimit() != 0 ||
+		cfg.IdleTimeoutSec != 5 || cfg.Workers != 2 || cfg.ReinforceStep != 0.25 ||
+		cfg.CommitJournal != "/var/lib/sekha/commits.jsonl" {
+		t.Fatalf("working memory overrides not applied: %+v", cfg)
+	}
+}
+
+func TestLoad_InvalidWorkingMemory(t *testing.T) {
+	for _, bad := range []string{
+		"WM_WORKERS=0\n",
+		"WM_IDLE_TIMEOUT_SEC=-1\n",
+		"WM_REINFORCE_STEP=0\n",
+		"WM_MAX_ITEMS=0\n",
+	} {
+		if _, err := Load(writeEnv(t, requiredKeys+bad)); err == nil {
+			t.Fatalf("expected error for %q, got nil", strings.TrimSpace(bad))
+		}
+	}
+}
+
+// .env.example documents the same working memory defaults the code uses.
+func TestEnvExampleMatchesWorkingMemoryDefaults(t *testing.T) {
+	example := map[string]string{}
+	if err := parseEnvFile("../../.env.example", example); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"WM_CALL_BUDGET":        strconv.Itoa(DefaultCallBudget),
+		"WM_WAIT_LIMIT_SEC":     strconv.Itoa(DefaultWaitLimitSec),
+		"WM_IDLE_TIMEOUT_SEC":   strconv.Itoa(DefaultIdleTimeoutSec),
+		"WM_WORKERS":            strconv.Itoa(DefaultWorkers),
+		"WM_RELATED_ITEMS":      strconv.Itoa(DefaultRelatedItems),
+		"WM_MAX_ITEMS":          strconv.Itoa(DefaultMaxItems),
+		"WM_REINFORCE_STEP":     strconv.FormatFloat(DefaultReinforceStep, 'f', -1, 64),
+		"WM_COMMIT_TIMEOUT_SEC": strconv.Itoa(DefaultCommitTimeoutSec),
+	}
+	for k, v := range want {
+		if example[k] != v {
+			t.Errorf(".env.example %s=%q, code default %q", k, example[k], v)
 		}
 	}
 }

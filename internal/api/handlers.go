@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/inference"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/model"
-	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/scratchpad"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/version"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/workingmemory"
 )
 
 const (
@@ -21,7 +21,8 @@ const (
 
 // Server encapsulates the working memory HTTP service and dependencies.
 type Server struct {
-	Store     *scratchpad.Store
+	// Memory is the working memory temp store; nil disables the /memories endpoints.
+	Memory    *workingmemory.Store
 	Budgeter  *budgeter.Budgeter
 	Engine    inference.Engine
 	mux       *http.ServeMux
@@ -33,12 +34,12 @@ type Server struct {
 }
 
 // NewServer initializes the deliberation scratchpad server.
-func NewServer(store *scratchpad.Store, bud *budgeter.Budgeter, engine inference.Engine) *Server {
+func NewServer(memory *workingmemory.Store, bud *budgeter.Budgeter, engine inference.Engine) *Server {
 	if bud == nil {
 		bud = budgeter.New(budgeter.DefaultConfig())
 	}
 	s := &Server{
-		Store:     store,
+		Memory:    memory,
 		Budgeter:  bud,
 		Engine:    engine,
 		mux:       http.NewServeMux(),
@@ -65,9 +66,8 @@ func (s *Server) SetDeliberateTimeout(d time.Duration) {
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/working/deliberate", s.handleDeliberate)
-	s.mux.HandleFunc("POST /api/v1/working/rollback", s.handleRollback)
-	s.mux.HandleFunc("POST /api/v1/working/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /api/v1/working/stats", s.handleStats)
+	s.registerMemoryRoutes()
 	s.mux.HandleFunc("GET /api/v1/working/health", s.handleHealth)
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 }
@@ -129,44 +129,15 @@ func (s *Server) handleDeliberate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
-	snapshotID := -1
-	if snapshotIDStr := r.URL.Query().Get("snapshot_id"); snapshotIDStr != "" {
-		if id, err := strconv.Atoi(snapshotIDStr); err == nil {
-			snapshotID = id
-		}
-	}
-
-	if err := s.Store.Rollback(snapshotID); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "rolled_back",
-		"message": "working memory restored to snapshot",
-		"state":   s.Store.GetState(),
-	})
-}
-
-func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Description string `json:"description"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Description == "" {
-		body.Description = "Manual snapshot"
-	}
-
-	snapID := s.Store.CreateSnapshot(body.Description)
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":      "ok",
-		"snapshot_id": snapID,
-		"description": body.Description,
-	})
-}
-
 func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.Store.GetTelemetry())
+	resp := map[string]any{
+		"version":        version.Version,
+		"uptime_seconds": int64(time.Since(s.startTime).Seconds()),
+	}
+	if s.Memory != nil {
+		resp["working_memory"] = s.Memory.Stats()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +154,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":          status,
 		"service":         "sekha-working-scratchpad",
+		"version":         version.Version,
 		"node":            s.nodeName,
 		"port":            s.port,
 		"uptime_seconds":  int64(time.Since(s.startTime).Seconds()),

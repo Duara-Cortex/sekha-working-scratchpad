@@ -13,7 +13,7 @@ import (
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/inference"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/model"
-	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/scratchpad"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/workingmemory"
 )
 
 type mockEngine struct {
@@ -36,8 +36,12 @@ func (m *mockEngine) Health(_ context.Context) error {
 	return nil
 }
 
+func newTestMemory() *workingmemory.Store {
+	return workingmemory.NewStore(workingmemory.Options{IdleTimeout: time.Minute, ReinforceStep: 0.1}, nil, nil)
+}
+
 func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
-	store := scratchpad.NewStore()
+	store := newTestMemory()
 	bud := budgeter.New(budgeter.DefaultConfig())
 	mock := &mockEngine{
 		output: &inference.DeliberationOutput{
@@ -102,13 +106,9 @@ func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 		t.Fatalf("call 1: unexpected token counts: %d, %d, %d", resp1.PromptTokens, resp1.CompletionTokens, resp1.TotalTokens)
 	}
 
-	// Verify store was not mutated
-	storeState := store.GetState()
-	if len(storeState.Trajectory) != 0 {
-		t.Fatalf("call 1: store trajectory should be empty, got %d steps", len(storeState.Trajectory))
-	}
-	if storeState.ActiveGoal != "" {
-		t.Fatalf("call 1: store active goal should be empty, got %s", storeState.ActiveGoal)
+	// Verify working memory was not mutated
+	if st := store.Stats(); st.Memories != 0 || st.Items != 0 {
+		t.Fatalf("call 1: working memory should be empty, got %+v", st)
 	}
 
 	// Call 2: Second deliberation with completely different Task 2
@@ -181,18 +181,14 @@ func TestServer_StatelessDeliberationConsecutiveCalls(t *testing.T) {
 		t.Fatalf("prompt 2 leaked call 1 state: %s", prompt2)
 	}
 
-	// Store must still be completely unmutated
-	finalStoreState := store.GetState()
-	if len(finalStoreState.Trajectory) != 0 {
-		t.Fatalf("store trajectory leaked state: %d steps", len(finalStoreState.Trajectory))
-	}
-	if finalStoreState.ActiveGoal != "" {
-		t.Fatalf("store active goal leaked state: %s", finalStoreState.ActiveGoal)
+	// Working memory must still be empty
+	if st := store.Stats(); st.Memories != 0 || st.Items != 0 {
+		t.Fatalf("working memory leaked state: %+v", st)
 	}
 }
 
 func TestServer_DeliberateInferenceError(t *testing.T) {
-	store := scratchpad.NewStore()
+	store := newTestMemory()
 	bud := budgeter.New(budgeter.DefaultConfig())
 	mock := &mockEngine{
 		err: context.DeadlineExceeded,
@@ -222,46 +218,9 @@ func TestServer_DeliberateInferenceError(t *testing.T) {
 		t.Fatalf("expected status 'error', got %s", errResp["status"])
 	}
 
-	// Verify store was not mutated on inference failure
-	state := store.GetState()
-	if len(state.Trajectory) != 0 {
-		t.Fatalf("expected 0 trajectory steps on error, got %d", len(state.Trajectory))
-	}
-}
-
-func TestServer_RollbackEndpoint(t *testing.T) {
-	store := scratchpad.NewStore()
-	bud := budgeter.New(budgeter.DefaultConfig())
-	mock := &mockEngine{
-		output: &inference.DeliberationOutput{
-			Thought: "Step 1 good", Action: "Do step 1", IsComplete: false,
-		},
-	}
-	server := NewServer(store, bud, mock)
-
-	store.SetGoal("Test rollback")
-	store.AddStep("Step 1 good", "Do step 1", model.StepStatusSuccess)
-	snapID := store.CreateSnapshot("Baseline")
-	if snapID != 1 {
-		t.Fatalf("expected snapID 1, got %d", snapID)
-	}
-
-	store.AddStep("Step 2 bad", "crash", model.StepStatusError)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/working/rollback?snapshot_id=1", nil)
-	w := httptest.NewRecorder()
-	server.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("rollback returned status %d: %s", w.Code, w.Body.String())
-	}
-
-	state := store.GetState()
-	if len(state.Trajectory) != 1 {
-		t.Fatalf("expected 1 step after rollback, got %d", len(state.Trajectory))
-	}
-	if state.Trajectory[0].Thought != "Step 1 good" {
-		t.Fatalf("expected step 1 thought, got: %s", state.Trajectory[0].Thought)
+	// Verify working memory was not mutated on inference failure
+	if st := store.Stats(); st.Memories != 0 || st.Items != 0 {
+		t.Fatalf("expected empty working memory on error, got %+v", st)
 	}
 }
 
@@ -282,7 +241,7 @@ func postDeliberate(t *testing.T, server *Server, body string) model.DeliberateR
 
 func TestServer_DeliberateWithoutNewFieldsReportsUsage(t *testing.T) {
 	mock := &mockEngine{output: &inference.DeliberationOutput{Thought: "t", Action: "a", PromptTokens: 249}}
-	server := NewServer(scratchpad.NewStore(), budgeter.New(budgeter.DefaultConfig()), mock)
+	server := NewServer(newTestMemory(), budgeter.New(budgeter.DefaultConfig()), mock)
 
 	// A pre-contract request: no prepacked, no prompt_budget_tokens.
 	resp := postDeliberate(t, server, `{
@@ -309,7 +268,7 @@ func TestServer_DeliberatePrepackedKeepsEverything(t *testing.T) {
 	cfg := budgeter.DefaultConfig()
 	cfg.MaxContextTokens = 4096
 	cfg.OutputReserve = 512
-	server := NewServer(scratchpad.NewStore(), budgeter.New(cfg), mock)
+	server := NewServer(newTestMemory(), budgeter.New(cfg), mock)
 
 	chunks := make([]model.SensoryChunk, 40)
 	for i := range chunks {
@@ -342,7 +301,7 @@ func (m *slowEngine) Infer(ctx context.Context, _ inference.Request) (*inference
 }
 
 func TestServer_DeliberateTimeoutIsConfigurable(t *testing.T) {
-	server := NewServer(scratchpad.NewStore(), nil, &slowEngine{})
+	server := NewServer(newTestMemory(), nil, &slowEngine{})
 	server.SetDeliberateTimeout(50 * time.Millisecond)
 
 	start := time.Now()

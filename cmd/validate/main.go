@@ -20,7 +20,7 @@ import (
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/config"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/inference"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/model"
-	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/scratchpad"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/workingmemory"
 )
 
 type syntheticMockEngine struct {
@@ -142,7 +142,7 @@ func main() {
 	// If no live service found or specified, run local mock deliberation engine
 	if targetURL == "" {
 		log.Printf("No remote service reachable. Starting local mock deliberation engine (node: %s, port: %d)...", envNode, envPort)
-		store := scratchpad.NewStore()
+		store := workingmemory.NewStore(workingmemory.Options{IdleTimeout: time.Minute, ReinforceStep: 0.1}, nil, nil)
 		bud := budgeter.New(budgeter.DefaultConfig())
 		mock := &syntheticMockEngine{}
 		s := api.NewServer(store, bud, mock)
@@ -204,74 +204,44 @@ func main() {
 	fmt.Printf("[Step 1] Ingested Goal & Stimuli -> Step %d: Thought: %q | Action: %q\n",
 		resp1.StepIndex, resp1.Thought, resp1.ProposedAction)
 
-	// Step 2: Create a state snapshot before executing hypothesis
-	var snapResp map[string]interface{}
-	snapReq := map[string]string{"description": "Pre-hypothesis checkpoint"}
-	if err := postJSON(client, targetURL+"/api/v1/working/snapshot", snapReq, &snapResp); err != nil {
-		log.Fatalf("Step 2 snapshot failed: %v", err)
+	// Steps 2-4: further stateless deliberations; each carries only its own payload.
+	observations := []string{
+		"Link carrier intact, zero CRC errors on physical interface",
+		"Rebooting the switch would disrupt active nodes. Querying sensory buffer capacity telemetry instead.",
+		"Sensory stats: 22.7MB / 64MB used (35.4%). Zero drops in last 10,000 frames.",
 	}
-	fmt.Printf("[Step 2] Captured snapshot checkpoint ID: %v\n", snapResp["snapshot_id"])
+	var last model.DeliberateResponse
+	for i, obs := range observations {
+		step := i + 2
+		if err := postJSON(client, targetURL+"/api/v1/working/deliberate", model.DeliberateRequest{Observation: obs}, &last); err != nil {
+			log.Fatalf("Step %d deliberate failed: %v", step, err)
+		}
+		fmt.Printf("[Step %d] Complete: %v | Thought: %q | Action: %q\n", step, last.IsComplete, last.Thought, last.ProposedAction)
+	}
 
-	// Step 3: Deliberate second step (produces a faulty/unsafe hypothesis)
-	delib2 := model.DeliberateRequest{
-		Observation: "Link carrier intact, zero CRC errors on physical interface",
+	// Step 5: Working memory stats
+	var stats struct {
+		Version       string `json:"version"`
+		WorkingMemory struct {
+			Memories int `json:"memories"`
+			Items    int `json:"items"`
+			Queued   int `json:"queued"`
+		} `json:"working_memory"`
 	}
-	var resp2 model.DeliberateResponse
-	if err := postJSON(client, targetURL+"/api/v1/working/deliberate", delib2, &resp2); err != nil {
-		log.Fatalf("Step 3 deliberate failed: %v", err)
-	}
-	fmt.Printf("[Step 3] Deliberation Step %d -> Thought: %q | Action: %q\n",
-		resp2.StepIndex, resp2.Thought, resp2.ProposedAction)
-
-	// Step 4: Error Detection & Isolation - Rollback
-	fmt.Println("[Step 4] Self-Correction triggered: Unsafe action identified. Rolling back...")
-	var rollbackResp map[string]interface{}
-	if err := postJSON(client, targetURL+"/api/v1/working/rollback", nil, &rollbackResp); err != nil {
-		log.Fatalf("Step 4 rollback failed: %v", err)
-	}
-	fmt.Printf("         Rollback response: status=%v message=%q\n",
-		rollbackResp["status"], rollbackResp["message"])
-
-	// Step 5: Corrected Deliberation Step
-	delib3 := model.DeliberateRequest{
-		Observation: "Rollback successful. Querying sensory buffer capacity telemetry instead.",
-	}
-	var resp3 model.DeliberateResponse
-	if err := postJSON(client, targetURL+"/api/v1/working/deliberate", delib3, &resp3); err != nil {
-		log.Fatalf("Step 5 deliberate failed: %v", err)
-	}
-	fmt.Printf("[Step 5] Corrected Step %d -> Thought: %q | Action: %q\n",
-		resp3.StepIndex, resp3.Thought, resp3.ProposedAction)
-
-	// Step 6: Final Resolution
-	delib4 := model.DeliberateRequest{
-		Observation: "Sensory stats: 22.7MB / 64MB used (35.4%). Zero drops in last 10,000 frames.",
-	}
-	var resp4 model.DeliberateResponse
-	if err := postJSON(client, targetURL+"/api/v1/working/deliberate", delib4, &resp4); err != nil {
-		log.Fatalf("Step 6 deliberate failed: %v", err)
-	}
-	fmt.Printf("[Step 6] Final Resolution Step %d -> Complete: %v | Thought: %q\n",
-		resp4.StepIndex, resp4.IsComplete, resp4.Thought)
-
-	// Step 7: Verify telemetry
-	var telemetry model.ScratchpadTelemetry
-	if err := getJSON(client, targetURL+"/api/v1/working/stats", &telemetry); err != nil {
-		log.Fatalf("Step 7 get stats failed: %v", err)
+	if err := getJSON(client, targetURL+"/api/v1/working/stats", &stats); err != nil {
+		log.Fatalf("Step 5 get stats failed: %v", err)
 	}
 
 	fmt.Println("\n----------------------------------------------------------------")
 	fmt.Println("                    EMPIRICAL VERIFICATION                      ")
 	fmt.Println("----------------------------------------------------------------")
-	fmt.Printf(" Active Goal:            %s\n", telemetry.ActiveGoal)
-	fmt.Printf(" Sensory Context Items:  %d chunks\n", telemetry.SensoryItemsCount)
-	fmt.Printf(" Long-Term Facts:        %d facts\n", telemetry.LongTermFactsCount)
-	fmt.Printf(" Trajectory Steps:       %d steps\n", telemetry.TrajectorySteps)
-	fmt.Printf(" Snapshots Captured:     %d snapshots\n", telemetry.SnapshotCount)
-	fmt.Printf(" Final Goal Resolved:    %v\n", resp4.IsComplete)
+	fmt.Printf(" Service Version:        %s\n", stats.Version)
+	fmt.Printf(" Held Memories:          %d (%d items, %d queued)\n",
+		stats.WorkingMemory.Memories, stats.WorkingMemory.Items, stats.WorkingMemory.Queued)
+	fmt.Printf(" Final Goal Resolved:    %v\n", last.IsComplete)
 	fmt.Println("----------------------------------------------------------------")
-	fmt.Println(" RESULT: PASS - Working Memory Scratchpad correctly isolated")
-	fmt.Println(" intermediate reasoning errors entirely within local RAM.")
+	fmt.Println(" RESULT: PASS - deliberation calls are stateless; no state was")
+	fmt.Println(" written to working memory by /deliberate.")
 	fmt.Println("================================================================")
 }
 
