@@ -29,6 +29,42 @@ type Config struct {
 	LongTermBudget    int // LONG_TERM_BUDGET
 	ObservationBudget int // OBSERVATION_BUDGET
 	SafetyMargin      int // PROMPT_SAFETY_MARGIN
+
+	// Working memory (all optional; see the Default* constants).
+	CallBudget       int     // WM_CALL_BUDGET: per-call prompt budget (tokens), related items included
+	WaitLimitSec     int     // WM_WAIT_LIMIT_SEC: longest a strong chunk may wait in the queue; 0 = none
+	IdleTimeoutSec   int     // WM_IDLE_TIMEOUT_SEC: idle time before a finished memory is committed
+	Workers          int     // WM_WORKERS: parallel model workers
+	RelatedItems     int     // WM_RELATED_ITEMS: related items from the same memory offered per call
+	MaxItems         int     // WM_MAX_ITEMS: items held across all memories; pushes beyond get 503
+	ReinforceStep    float64 // WM_REINFORCE_STEP: strength added by one reinforcement
+	CommitTimeoutSec int     // WM_COMMIT_TIMEOUT_SEC: longest one commit may take
+	CommitJournal    string  // WM_COMMIT_JOURNAL: file that receives commits until Task 31's endpoint exists
+	EmbedURL         string  // WM_EMBED_URL: OpenAI-compatible embeddings server for scoring harness items
+	EmbedModel       string  // WM_EMBED_MODEL: embedding model name
+}
+
+// Working memory defaults.
+const (
+	DefaultCallBudget       = 1024
+	DefaultWaitLimitSec     = 600
+	DefaultIdleTimeoutSec   = 60
+	DefaultWorkers          = 1
+	DefaultRelatedItems     = 5
+	DefaultMaxItems         = 50000
+	DefaultReinforceStep    = 0.1
+	DefaultCommitTimeoutSec = 30
+)
+
+// WaitLimit returns the queue wait limit; 0 means no limit.
+func (c *Config) WaitLimit() time.Duration { return time.Duration(c.WaitLimitSec) * time.Second }
+
+// IdleTimeout returns the idle time before a finished memory is committed.
+func (c *Config) IdleTimeout() time.Duration { return time.Duration(c.IdleTimeoutSec) * time.Second }
+
+// CommitTimeout returns the longest one commit may take.
+func (c *Config) CommitTimeout() time.Duration {
+	return time.Duration(c.CommitTimeoutSec) * time.Second
 }
 
 // InferenceTimeout returns the duration for inference requests.
@@ -156,6 +192,40 @@ func Load(envPaths ...string) (*Config, error) {
 		}
 	}
 
+	var wm struct {
+		callBudget, waitLimit, idle, workers, related, maxItems, commitTimeout int
+	}
+	for _, opt := range []struct {
+		key      string
+		target   *int
+		def      int
+		positive bool
+	}{
+		{"WM_CALL_BUDGET", &wm.callBudget, DefaultCallBudget, true},
+		{"WM_WAIT_LIMIT_SEC", &wm.waitLimit, DefaultWaitLimitSec, false},
+		{"WM_IDLE_TIMEOUT_SEC", &wm.idle, DefaultIdleTimeoutSec, true},
+		{"WM_WORKERS", &wm.workers, DefaultWorkers, true},
+		{"WM_RELATED_ITEMS", &wm.related, DefaultRelatedItems, false},
+		{"WM_MAX_ITEMS", &wm.maxItems, DefaultMaxItems, true},
+		{"WM_COMMIT_TIMEOUT_SEC", &wm.commitTimeout, DefaultCommitTimeoutSec, true},
+	} {
+		if *opt.target, err = optionalNonNegativeInt(opt.key, opt.def, envMap); err != nil {
+			return nil, err
+		}
+		if opt.positive && *opt.target == 0 {
+			return nil, fmt.Errorf("invalid %s: must be greater than zero", opt.key)
+		}
+	}
+	reinforceStep := DefaultReinforceStep
+	if raw, ok := lookupKey("WM_REINFORCE_STEP", envMap); ok && raw != "" {
+		if reinforceStep, err = strconv.ParseFloat(raw, 64); err != nil || reinforceStep <= 0 {
+			return nil, fmt.Errorf("invalid WM_REINFORCE_STEP: %q must be a positive number", raw)
+		}
+	}
+	commitJournal, _ := lookupKey("WM_COMMIT_JOURNAL", envMap)
+	embedURL, _ := lookupKey("WM_EMBED_URL", envMap)
+	embedModel, _ := lookupKey("WM_EMBED_MODEL", envMap)
+
 	return &Config{
 		Port:                port,
 		NodeName:            nodeName,
@@ -170,6 +240,17 @@ func Load(envPaths ...string) (*Config, error) {
 		LongTermBudget:      longTermBudget,
 		ObservationBudget:   observationBudget,
 		SafetyMargin:        safetyMargin,
+		CallBudget:          wm.callBudget,
+		WaitLimitSec:        wm.waitLimit,
+		IdleTimeoutSec:      wm.idle,
+		Workers:             wm.workers,
+		RelatedItems:        wm.related,
+		MaxItems:            wm.maxItems,
+		ReinforceStep:       reinforceStep,
+		CommitTimeoutSec:    wm.commitTimeout,
+		CommitJournal:       commitJournal,
+		EmbedURL:            strings.TrimRight(embedURL, "/"),
+		EmbedModel:          embedModel,
 	}, nil
 }
 

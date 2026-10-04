@@ -15,7 +15,8 @@ import (
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/budgeter"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/config"
 	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/inference"
-	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/scratchpad"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/version"
+	"github.com/Duara-Cortex/sekha-working-scratchpad/internal/workingmemory"
 )
 
 func main() {
@@ -75,7 +76,7 @@ func main() {
 		cfg.SystemPrompt = *systemPromptFlag
 	}
 
-	log.Printf("Starting Sekha Working Memory Deliberation Scratchpad Daemon...")
+	log.Printf("Starting Sekha Working Memory Deliberation Scratchpad Daemon v%s...", version.Version)
 	log.Printf("Node Name:           %s", cfg.NodeName)
 	log.Printf("Deliberation Port:   %d", cfg.Port)
 	log.Printf("Inference Server:    %s", cfg.InferenceURL)
@@ -94,7 +95,35 @@ func main() {
 		log.Printf("Sensory Budget:      rest of window (no cap)")
 	}
 
-	store := scratchpad.NewStore()
+	log.Printf("WM Call Budget:      %d tokens", cfg.CallBudget)
+	log.Printf("WM Wait Limit:       %ds (0 = none)", cfg.WaitLimitSec)
+	log.Printf("WM Idle Timeout:     %ds", cfg.IdleTimeoutSec)
+	log.Printf("WM Workers:          %d", cfg.Workers)
+	log.Printf("WM Related Items:    %d per call (same memory only)", cfg.RelatedItems)
+	log.Printf("WM Max Items:        %d (Node 3 pushes beyond this get 503)", cfg.MaxItems)
+
+	// With no commit target the store refuses Node 3's pushes (503), so chunks stay on Node 3.
+	var committer workingmemory.Committer
+	if cfg.CommitJournal != "" {
+		committer = &workingmemory.JournalCommitter{Path: cfg.CommitJournal}
+		log.Printf("WM Commit Journal:   %s (interim target until Node 1's write endpoint, Task 31)", cfg.CommitJournal)
+	} else {
+		log.Printf("WM Commit Journal:   none; pushes from Node 3 are refused until WM_COMMIT_JOURNAL is set")
+	}
+	var scorer workingmemory.Scorer
+	if cfg.EmbedURL != "" {
+		scorer = &workingmemory.EmbeddingScorer{BaseURL: cfg.EmbedURL, Model: cfg.EmbedModel, HTTP: &http.Client{Timeout: 10 * time.Second}}
+		log.Printf("WM Scorer:           %s (%s)", cfg.EmbedURL, cfg.EmbedModel)
+	} else {
+		log.Printf("WM Scorer:           none; harness items and thoughts are stored unscored")
+	}
+	store := workingmemory.NewStore(workingmemory.Options{
+		WaitLimit:     cfg.WaitLimit(),
+		IdleTimeout:   cfg.IdleTimeout(),
+		ReinforceStep: cfg.ReinforceStep,
+		MaxItems:      cfg.MaxItems,
+		RelatedLimit:  cfg.RelatedItems,
+	}, committer, scorer)
 
 	bCfg := budgeter.DefaultConfig()
 	bCfg.MaxContextTokens = cfg.ContextLimit
@@ -116,11 +145,29 @@ func main() {
 	server.SetNodeInfo(cfg.NodeName, cfg.Port)
 	server.SetDeliberateTimeout(cfg.InferenceTimeout())
 
+	processor := &workingmemory.Processor{
+		Store:  store,
+		Engine: client,
+		Prompt: workingmemory.PromptConfig{
+			Budget:     cfg.CallBudget,
+			TaskBudget: cfg.GoalBudget,
+		},
+		Workers:       cfg.Workers,
+		CallTimeout:   cfg.InferenceTimeout(),
+		CommitTimeout: cfg.CommitTimeout(),
+		SweepInterval: time.Second,
+		MaxTokens:     cfg.OutputReserve,
+	}
+	wmCtx, stopWM := context.WithCancel(context.Background())
+	defer stopWM()
+	go processor.Run(wmCtx)
+
 	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      server,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: cfg.InferenceTimeout() + 15*time.Second,
+		Addr:        fmt.Sprintf(":%d", cfg.Port),
+		Handler:     server,
+		ReadTimeout: 15 * time.Second,
+		// An explicit commit may wait for an in-flight model call and then for the commit itself.
+		WriteTimeout: cfg.InferenceTimeout() + cfg.CommitTimeout() + 15*time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -136,6 +183,9 @@ func main() {
 
 	<-stop
 	log.Println("Shutting down scratchpad daemon gracefully...")
+	// Working memory is RAM only: memories not yet committed are lost with the process.
+	stopWM()
+	store.Close()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
